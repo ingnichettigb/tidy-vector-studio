@@ -4,7 +4,7 @@ export type Tool = "select" | "pan" | "line" | "rect";
 
 // Drawing ink colors (CAD entity colors, also mapped to DXF ACI indexes)
 export const PALETTE = [
-  { label: "Nero", value: "#e8e8e8", swatch: "#111111", aci: 7 },
+  { label: "Nero", value: "#111111", swatch: "#111111", aci: 7 },
   { label: "Rosso", value: "#ff4d4d", swatch: "#ff4d4d", aci: 1 },
   { label: "Blu", value: "#4da3ff", swatch: "#4da3ff", aci: 5 },
   { label: "Verde", value: "#3ddc84", swatch: "#3ddc84", aci: 3 },
@@ -16,7 +16,7 @@ export type Ent =
   | { type: "rect"; x: number; y: number; w: number; h: number; color: string; sw?: number }
   | { type: "text"; x: number; y: number; text: string; size: number; color: string; angle?: number };
 
-const W = "#e8e8e8", DIM = "#4da3ff", TXT = "#ffd23f", DOOR = "#3ddc84";
+const W = "#111111", DIM = "#4da3ff", TXT = "#c2410c", DOOR = "#3ddc84";
 
 function dim(x1: number, y1: number, x2: number, y2: number, label: string, off: number): Ent[] {
   const horiz = y1 === y2;
