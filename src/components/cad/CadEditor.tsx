@@ -67,16 +67,21 @@ export default function CadEditor() {
   const loadDrawing = useCallback((src: number | Ent[]) => {
     const cv = cvRef.current;
     if (!cv) return;
+    cv.renderOnAddRemove = false;
     cv.clear();
+    const objs: FabricObject[] = [];
     (typeof src === "number" ? buildMockDrawing(src) : src).forEach((e) => {
       let o: FabricObject;
-      if (e.type === "line") o = new Line([e.x1, e.y1, e.x2, e.y2], { stroke: e.color, strokeWidth: e.w ?? 1.5, strokeUniform: true, ...lock });
+      if (e.type === "line") o = new Line([e.x1, e.y1, e.x2, e.y2], { stroke: e.color, strokeWidth: e.w ?? 1.5, strokeUniform: true, objectCaching: false, ...lock });
       else if (e.type === "rect") o = new Rect({ left: e.x, top: e.y, width: e.w, height: e.h, fill: "transparent", stroke: e.color, strokeWidth: e.sw ?? 1.5, strokeUniform: true, ...lock });
       else o = new FabricText(e.text, { left: e.x, top: e.y, fontSize: e.size, fill: e.color, fontFamily: "JetBrains Mono, monospace", angle: e.angle ?? 0, ...lock });
-      cv.add(o);
+      objs.push(o);
     });
+    if (objs.length) cv.add(...objs);
+    cv.renderOnAddRemove = true;
     applyTool(toolRef.current);
     zoomExtents();
+    cv.requestRenderAll();
   }, [applyTool, zoomExtents]);
 
   const deleteSelected = useCallback(() => {
@@ -168,20 +173,27 @@ export default function CadEditor() {
     return () => window.removeEventListener("keydown", onKey);
   }, [deleteSelected, applyTool]);
 
-  const handleFile = (f: File) => {
+  const handleFile = async (f: File) => {
     const ext = f.name.split(".").pop()?.toLowerCase();
     if (ext === "dwg") { log("DWG binario: salvalo come DXF da AutoCAD/LibreCAD e riaprilo"); return; }
     if (ext !== "dxf") { log(`Formato non supportato: .${ext}`); return; }
     setLoading("Lettura entità DXF…");
-    f.text().then((txt) => {
-      try {
-        const ents = parseDxf(txt);
-        if (!ents.length) { log("Nessuna entità supportata nel file"); return; }
-        setFileName(f.name);
-        loadDrawing(ents);
-        log(`${f.name}: ${ents.length} entità caricate`);
-      } catch (err) { log(`Errore lettura DXF: ${(err as Error).message}`); }
-    }).finally(() => setLoading(null));
+    try {
+      const txt = await f.text();
+      if (txt.startsWith("AutoCAD Binary DXF")) throw new Error("DXF binario non supportato, salva come DXF ASCII");
+      await new Promise((r) => setTimeout(r, 30)); // let the loader paint
+      const ents = parseDxf(txt);
+      if (!ents.length) { log("Nessuna entità supportata nel file"); return; }
+      setLoading(`Disegno di ${ents.length} entità…`);
+      await new Promise((r) => setTimeout(r, 30));
+      setFileName(f.name);
+      loadDrawing(ents);
+      log(`${f.name}: ${ents.length} entità caricate`);
+    } catch (err) {
+      log(`Errore lettura DXF: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setLoading(null);
+    }
   };
 
   const exportDxf = () => {
@@ -248,8 +260,8 @@ export default function CadEditor() {
         </div>
         <div className="flex items-center gap-2 border-l border-border px-4">
           <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border border-border px-3 py-2 text-sm hover:bg-accent">
-            <Upload className="h-4 w-4" /> Apri
-            <input type="file" accept=".dwg,.dxf" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = ""; }} />
+            <Upload className="h-4 w-4" /> Carica DXF
+            <input type="file" accept=".dxf" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = ""; }} />
           </label>
           <button onClick={exportDxf} className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">
             <Download className="h-4 w-4" /> Esporta DXF
