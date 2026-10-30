@@ -13,7 +13,7 @@ export default function CadEditor() {
   const cvRef = useRef<Canvas | null>(null);
   const [tool, setTool] = useState<Tool>("select");
   const toolRef = useRef<Tool>("select");
-  const [color, setColor] = useState(PALETTE[0].value);
+  const [color, setColor] = useState<string>(PALETTE[0]!.value);
   const colorRef = useRef(color);
   const [history, setHistory] = useState<string[]>(["Disegno di esempio caricato"]);
   const [cmd, setCmd] = useState("");
