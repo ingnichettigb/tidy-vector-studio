@@ -2,7 +2,7 @@ import DxfParser from "dxf-parser";
 import type { Ent } from "./cad-data";
 
 const ACI: Record<number, string> = {
-  1: "#ff4d4d", 2: "#ffd23f", 3: "#3ddc84", 4: "#3dd6dc", 5: "#4da3ff", 6: "#e05cff", 7: "#e8e8e8", 8: "#8a8a8a", 9: "#c0c0c0",
+  1: "#ff4d4d", 2: "#b8860b", 3: "#3ddc84", 4: "#3dd6dc", 5: "#4da3ff", 6: "#e05cff", 7: "#111111", 8: "#8a8a8a", 9: "#777777",
 };
 
 type P = { x: number; y: number };
@@ -13,8 +13,8 @@ function colorOf(e: AnyEnt, layers: Record<string, AnyEnt>): string {
   let idx: number | undefined = e.colorIndex;
   if (idx === undefined || idx === 256 || idx === 0) idx = layers[e.layer]?.colorIndex;
   if (idx !== undefined && ACI[Math.abs(idx)]) return ACI[Math.abs(idx)]!;
-  if (typeof e.color === "number" && e.color !== 0 && e.color !== 0xffffff) return "#" + e.color.toString(16).padStart(6, "0");
-  return "#e8e8e8";
+  if (typeof e.color === "number" && e.color !== 0 && e.color !== 0xffffff && e.color < 0xe0e0e0) return "#" + e.color.toString(16).padStart(6, "0");
+  return "#111111";
 }
 
 /** Convert DXF text to editor entities (Y axis flipped for screen). */
