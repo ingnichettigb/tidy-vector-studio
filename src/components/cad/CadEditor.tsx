@@ -3,7 +3,8 @@ import { Canvas, Line, Rect, FabricText, Point, type FabricObject } from "fabric
 import {
   MousePointer2, Hand, Minus, Square, Trash2, ZoomIn, ZoomOut, Maximize, Upload, Download, Loader2, Terminal,
 } from "lucide-react";
-import { PALETTE, buildMockDrawing, toDxf, type Tool } from "./cad-data";
+import { PALETTE, buildMockDrawing, toDxf, type Tool, type Ent } from "./cad-data";
+import { parseDxf } from "./dxf-import";
 
 const lock = { lockMovementX: true, lockMovementY: true, hasControls: false, hoverCursor: "pointer" };
 
@@ -63,11 +64,11 @@ export default function CadEditor() {
     setZoom(z);
   }, []);
 
-  const loadDrawing = useCallback((variant: number) => {
+  const loadDrawing = useCallback((src: number | Ent[]) => {
     const cv = cvRef.current;
     if (!cv) return;
     cv.clear();
-    buildMockDrawing(variant).forEach((e) => {
+    (typeof src === "number" ? buildMockDrawing(src) : src).forEach((e) => {
       let o: FabricObject;
       if (e.type === "line") o = new Line([e.x1, e.y1, e.x2, e.y2], { stroke: e.color, strokeWidth: e.w ?? 1.5, strokeUniform: true, ...lock });
       else if (e.type === "rect") o = new Rect({ left: e.x, top: e.y, width: e.w, height: e.h, fill: "transparent", stroke: e.color, strokeWidth: e.sw ?? 1.5, strokeUniform: true, ...lock });
@@ -169,11 +170,18 @@ export default function CadEditor() {
 
   const handleFile = (f: File) => {
     const ext = f.name.split(".").pop()?.toLowerCase();
-    if (ext !== "dwg" && ext !== "dxf") { log(`Formato non supportato: .${ext}`); return; }
-    setFileName(f.name);
-    setLoading(`Conversione ${ext.toUpperCase()} → SVG sul server…`);
-    setTimeout(() => setLoading("Vettorializzazione entità…"), 900);
-    setTimeout(() => { setLoading(null); loadDrawing(1); log(`File ${f.name} caricato`); }, 2000);
+    if (ext === "dwg") { log("DWG binario: salvalo come DXF da AutoCAD/LibreCAD e riaprilo"); return; }
+    if (ext !== "dxf") { log(`Formato non supportato: .${ext}`); return; }
+    setLoading("Lettura entità DXF…");
+    f.text().then((txt) => {
+      try {
+        const ents = parseDxf(txt);
+        if (!ents.length) { log("Nessuna entità supportata nel file"); return; }
+        setFileName(f.name);
+        loadDrawing(ents);
+        log(`${f.name}: ${ents.length} entità caricate`);
+      } catch (err) { log(`Errore lettura DXF: ${(err as Error).message}`); }
+    }).finally(() => setLoading(null));
   };
 
   const exportDxf = () => {
@@ -241,7 +249,7 @@ export default function CadEditor() {
         <div className="flex items-center gap-2 border-l border-border px-4">
           <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border border-border px-3 py-2 text-sm hover:bg-accent">
             <Upload className="h-4 w-4" /> Apri
-            <input type="file" accept=".dwg,.dxf" className="hidden" onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])} />
+            <input type="file" accept=".dwg,.dxf" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = ""; }} />
           </label>
           <button onClick={exportDxf} className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">
             <Download className="h-4 w-4" /> Esporta DXF
