@@ -42,8 +42,27 @@ export function parseDxf(text: string): Ent[] {
           B = tf(b);
         out.push({ type: "line", x1: A.x, y1: -A.y, x2: B.x, y2: -B.y, color: c, w: 1 });
       };
-      const poly = (pts: P[]) => {
-        for (let i = 1; i < pts.length; i++) seg(pts[i - 1]!, pts[i]!);
+      // One entity per polyline/circle/arc instead of one per segment: far fewer entities.
+      const poly = (pts: P[], closed = false) => {
+        if (pts.length < 2) return;
+        const tp = pts.map((q) => {
+          const A = tf(q);
+          return { x: A.x, y: -A.y };
+        });
+        if (closed && tp.length > 2) tp.push({ ...tp[0]! });
+        if (tp.length === 2) {
+          out.push({
+            type: "line",
+            x1: tp[0]!.x,
+            y1: tp[0]!.y,
+            x2: tp[1]!.x,
+            y2: tp[1]!.y,
+            color: c,
+            w: 1,
+          });
+          return;
+        }
+        out.push({ type: "poly", pts: tp, color: c, w: 1 });
       };
       const arc = (cx: number, cy: number, r: number, a0: number, a1: number) => {
         if (a1 < a0) a1 += Math.PI * 2;
@@ -62,8 +81,7 @@ export function parseDxf(text: string): Ent[] {
         case "LWPOLYLINE":
         case "POLYLINE": {
           const v = e.vertices ?? [];
-          poly(v);
-          if (e.shape && v.length > 2) seg(v[v.length - 1], v[0]);
+          poly(v, !!e.shape);
           break;
         }
         case "CIRCLE":

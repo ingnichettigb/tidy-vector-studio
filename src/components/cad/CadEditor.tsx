@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Canvas, Line, Rect, FabricText, Point, type FabricObject } from "fabric";
+import { Canvas, Line, Rect, Point, type FabricObject } from "fabric";
 import {
   MousePointer2,
   Hand,
@@ -16,23 +16,24 @@ import {
   Terminal,
 } from "lucide-react";
 import { PALETTE, buildMockDrawing, toDxf, type Tool, type Ent } from "./cad-data";
+import { DrawingLayer } from "./drawing-layer";
 import { parseDxf } from "./dxf-import";
 
-const lock = {
-  lockMovementX: true,
-  lockMovementY: true,
+// Rubber-band preview shown while drawing a new line/rectangle (the finished shape is
+// committed to the DrawingLayer on mouse up).
+const previewProps = {
+  selectable: false,
+  evented: false,
   hasControls: false,
-  hoverCursor: "pointer",
-  // Lines and rectangles are hit only near their stroke, so the empty inside of a room
-  // does not select (or erase) the whole wall rectangle around it.
-  perPixelTargetFind: true,
-  targetFindTolerance: 6,
+  strokeWidth: 2,
+  strokeUniform: true,
 };
 
 export default function CadEditor() {
   const hostRef = useRef<HTMLDivElement>(null);
   const elRef = useRef<HTMLCanvasElement>(null);
   const cvRef = useRef<Canvas | null>(null);
+  const layerRef = useRef<DrawingLayer>(new DrawingLayer());
   const [tool, setTool] = useState<Tool>("select");
   const toolRef = useRef<Tool>("select");
   const [color, setColor] = useState<string>(PALETTE[0]!.value);
@@ -54,49 +55,27 @@ export default function CadEditor() {
     setTool(t);
     const cv = cvRef.current;
     if (!cv) return;
-    // Drag on empty space draws the selection box only in select mode.
-    cv.selection = t === "select";
-    cv.discardActiveObject();
+    layerRef.current.selected.clear();
     cv.defaultCursor = t === "pan" ? "grab" : t === "select" ? "default" : "crosshair";
-    cv.forEachObject((o) => {
-      o.selectable = t === "select";
-      o.evented = t === "select" || t === "erase";
-    });
     cv.requestRenderAll();
   }, []);
 
   const zoomExtents = useCallback(() => {
     const cv = cvRef.current;
     if (!cv) return;
-    const objs = cv.getObjects();
+    const b = layerRef.current.bounds();
     cv.setViewportTransform([1, 0, 0, 1, 0, 0]);
-    if (!objs.length) {
+    if (!b) {
       setZoom(1);
       return;
     }
-    let x1 = Infinity,
-      y1 = Infinity,
-      x2 = -Infinity,
-      y2 = -Infinity;
-    objs.forEach((o) => {
-      const r = o.getBoundingRect();
-      x1 = Math.min(x1, r.left);
-      y1 = Math.min(y1, r.top);
-      x2 = Math.max(x2, r.left + r.width);
-      y2 = Math.max(y2, r.top + r.height);
-    });
+    const bw = b.x2 - b.x1 || 1,
+      bh = b.y2 - b.y1 || 1;
     const pad = 60,
       W = cv.getWidth(),
       H = cv.getHeight();
-    const z = Math.min((W - pad * 2) / (x2 - x1), (H - pad * 2) / (y2 - y1));
-    cv.setViewportTransform([
-      z,
-      0,
-      0,
-      z,
-      (W - (x2 - x1) * z) / 2 - x1 * z,
-      (H - (y2 - y1) * z) / 2 - y1 * z,
-    ]);
+    const z = Math.min((W - pad * 2) / bw, (H - pad * 2) / bh);
+    cv.setViewportTransform([z, 0, 0, z, (W - bw * z) / 2 - b.x1 * z, (H - bh * z) / 2 - b.y1 * z]);
     setZoom(z);
   }, []);
 
@@ -112,66 +91,23 @@ export default function CadEditor() {
     (src: number | Ent[]) => {
       const cv = cvRef.current;
       if (!cv) return;
-      cv.renderOnAddRemove = false;
-      cv.clear();
-      const objs: FabricObject[] = [];
-      (typeof src === "number" ? buildMockDrawing(src) : src).forEach((e) => {
-        let o: FabricObject;
-        if (e.type === "line")
-          o = new Line([e.x1, e.y1, e.x2, e.y2], {
-            stroke: e.color,
-            strokeWidth: e.w ?? 1.5,
-            strokeUniform: true,
-            objectCaching: false,
-            ...lock,
-          });
-        else if (e.type === "rect")
-          o = new Rect({
-            left: e.x,
-            top: e.y,
-            width: e.w,
-            height: e.h,
-            fill: "transparent",
-            stroke: e.color,
-            strokeWidth: e.sw ?? 1.5,
-            strokeUniform: true,
-            ...lock,
-          });
-        else
-          o = new FabricText(e.text, {
-            left: e.x,
-            top: e.y,
-            fontSize: e.size,
-            fill: e.color,
-            fontFamily: "JetBrains Mono, monospace",
-            angle: e.angle ?? 0,
-            ...lock,
-            perPixelTargetFind: false, // text: the whole text box is clickable
-          });
-        objs.push(o);
-      });
-      // Add in chunks: spreading a huge array into one call overflows the JS stack on big DXF files.
-      for (let i = 0; i < objs.length; i += 2000) cv.add(...objs.slice(i, i + 2000));
-      cv.renderOnAddRemove = true;
-      applyTool(toolRef.current);
+      layerRef.current = new DrawingLayer(typeof src === "number" ? buildMockDrawing(src) : src);
       zoomExtents();
       cv.requestRenderAll();
     },
-    [applyTool, zoomExtents],
+    [zoomExtents],
   );
 
   const deleteSelected = useCallback(() => {
     const cv = cvRef.current;
     if (!cv) return;
-    const sel = cv.getActiveObjects();
-    if (!sel.length) {
+    const n = layerRef.current.removeSelected();
+    if (!n) {
       log("Nessun elemento selezionato");
       return;
     }
-    cv.discardActiveObject();
-    sel.forEach((o) => cv.remove(o));
     cv.requestRenderAll();
-    log(sel.length > 1 ? `${sel.length} elementi eliminati` : "Elemento eliminato");
+    log(n > 1 ? `${n} elementi eliminati` : "Elemento eliminato");
   }, [log]);
 
   // init canvas
@@ -182,35 +118,63 @@ export default function CadEditor() {
       width: host.clientWidth,
       height: host.clientHeight,
       selection: false,
-      // "Window" selection: only elements fully inside the box are picked, so a box drawn
-      // inside a room does not also grab the big wall rectangles around it.
-      selectionFullyContained: true,
+      skipTargetFind: true, // picking is done on the DrawingLayer, not on canvas objects
       backgroundColor: "transparent",
-      selectionColor: "rgba(80,160,255,0.15)",
     });
     cvRef.current = cv;
-    FabricObject_style(cv);
 
     let drawing: FabricObject | null = null,
       start: Point | null = null,
+      end: Point | null = null,
+      drawColor = "",
       panning = false,
       erasing = false,
       erased = 0,
+      marquee: { x0: number; y0: number; x1: number; y1: number } | null = null,
       last = { x: 0, y: 0 };
 
-    const eraseTarget = (o?: FabricObject) => {
-      if (!o) return;
-      cv.remove(o);
-      erased++;
-      cv.requestRenderAll();
-    };
+    // The drawing is painted by the DrawingLayer under Fabric's own objects (the preview),
+    // selection highlight and rubber-band box on top.
+    cv.on("before:render", ({ ctx }) =>
+      layerRef.current.draw(ctx, cv.viewportTransform, cv.getWidth(), cv.getHeight()),
+    );
+    cv.on("after:render", ({ ctx }) => {
+      layerRef.current.drawSelection(ctx, cv.viewportTransform);
+      if (marquee) {
+        const x = Math.min(marquee.x0, marquee.x1),
+          y = Math.min(marquee.y0, marquee.y1);
+        ctx.save();
+        ctx.fillStyle = "rgba(80,160,255,0.15)";
+        ctx.strokeStyle = "#3b9cff";
+        ctx.lineWidth = 1;
+        ctx.fillRect(x, y, Math.abs(marquee.x1 - marquee.x0), Math.abs(marquee.y1 - marquee.y0));
+        ctx.strokeRect(x, y, Math.abs(marquee.x1 - marquee.x0), Math.abs(marquee.y1 - marquee.y0));
+        ctx.restore();
+      }
+    });
 
-    // A selection made with the box must not be draggable: the drawing is edited only by deleting.
-    const lockSelection = () => {
-      cv.getActiveObject()?.set({ lockMovementX: true, lockMovementY: true, hasControls: false });
+    // Erase the topmost element near a scene point.
+    const eraseAt = (x: number, y: number) => {
+      const L = layerRef.current;
+      const i = L.hitAt(x, y, 6 / cv.getZoom());
+      if (i >= 0 && L.remove(i)) {
+        erased++;
+        cv.requestRenderAll();
+      }
     };
-    cv.on("selection:created", lockSelection);
-    cv.on("selection:updated", lockSelection);
+    // Erase everything the pointer crossed since the last event: check intermediate points,
+    // otherwise a fast swipe can jump over thin lines.
+    let lastErase: { x: number; y: number } | null = null;
+    const sweepErase = (ev: MouseEvent) => {
+      const p = cv.getScenePoint(ev);
+      const from = lastErase ?? p;
+      const dx = p.x - from.x,
+        dy = p.y - from.y;
+      const steps = Math.max(1, Math.ceil((Math.hypot(dx, dy) * cv.getZoom()) / 4));
+      for (let i = 1; i <= steps; i++)
+        eraseAt(from.x + (dx * i) / steps, from.y + (dy * i) / steps);
+      lastErase = { x: p.x, y: p.y };
+    };
 
     cv.on("mouse:down", (opt) => {
       const t = toolRef.current;
@@ -218,7 +182,8 @@ export default function CadEditor() {
       if (t === "erase" && ev.button !== 1) {
         erasing = true;
         erased = 0;
-        eraseTarget(opt.target);
+        lastErase = null;
+        sweepErase(ev);
         return;
       }
       if (t === "pan" || ev.button === 1) {
@@ -227,31 +192,39 @@ export default function CadEditor() {
         cv.setCursor("grabbing");
         return;
       }
+      if (t === "select") {
+        const L = layerRef.current;
+        const p = cv.getScenePoint(ev);
+        const i = L.hitAt(p.x, p.y, 6 / cv.getZoom());
+        if (i >= 0) {
+          if (ev.shiftKey && L.selected.has(i)) L.selected.delete(i);
+          else {
+            if (!ev.shiftKey) L.selected.clear();
+            L.selected.add(i);
+          }
+        } else {
+          // empty space: start a selection box (window selection)
+          if (!ev.shiftKey) L.selected.clear();
+          const v = cv.getViewportPoint(ev);
+          marquee = { x0: v.x, y0: v.y, x1: v.x, y1: v.y };
+        }
+        cv.requestRenderAll();
+        return;
+      }
       if (t === "line" || t === "rect") {
-        start = cv.getScenePoint(ev);
-        const c = colorRef.current;
+        start = end = cv.getScenePoint(ev);
+        drawColor = colorRef.current;
         drawing =
           t === "line"
-            ? new Line([start.x, start.y, start.x, start.y], {
-                stroke: c,
-                strokeWidth: 2,
-                strokeUniform: true,
-                ...lock,
-                selectable: false,
-                evented: false,
-              })
+            ? new Line([start.x, start.y, start.x, start.y], { stroke: drawColor, ...previewProps })
             : new Rect({
                 left: start.x,
                 top: start.y,
                 width: 0,
                 height: 0,
                 fill: "transparent",
-                stroke: c,
-                strokeWidth: 2,
-                strokeUniform: true,
-                ...lock,
-                selectable: false,
-                evented: false,
+                stroke: drawColor,
+                ...previewProps,
               });
         cv.add(drawing);
       }
@@ -267,11 +240,18 @@ export default function CadEditor() {
         return;
       }
       if (erasing) {
-        eraseTarget(opt.target);
+        sweepErase(ev);
+        return;
+      }
+      if (marquee) {
+        const v = cv.getViewportPoint(ev);
+        marquee.x1 = v.x;
+        marquee.y1 = v.y;
+        cv.requestRenderAll();
         return;
       }
       if (!drawing || !start) return;
-      const p = cv.getScenePoint(ev);
+      const p = (end = cv.getScenePoint(ev));
       if (drawing instanceof Line) drawing.set({ x2: p.x, y2: p.y });
       else
         drawing.set({
@@ -291,18 +271,56 @@ export default function CadEditor() {
       }
       if (erasing) {
         erasing = false;
+        lastErase = null;
         if (erased) log(erased > 1 ? `${erased} elementi cancellati` : "Elemento cancellato");
         return;
       }
-      if (drawing) {
-        const tiny =
-          drawing instanceof Line
-            ? Math.hypot(drawing.x2! - drawing.x1!, drawing.y2! - drawing.y1!) < 2
-            : drawing.width! < 2 || drawing.height! < 2;
-        if (tiny) cv.remove(drawing);
-        else log(drawing instanceof Line ? "Linea creata" : "Rettangolo creato");
+      if (marquee) {
+        const m = marquee;
+        marquee = null;
+        if (Math.abs(m.x1 - m.x0) > 3 || Math.abs(m.y1 - m.y0) > 3) {
+          const vpt = cv.viewportTransform!;
+          const toScene = (x: number, y: number) => ({
+            x: (x - vpt[4]!) / vpt[0]!,
+            y: (y - vpt[5]!) / vpt[3]!,
+          });
+          const L = layerRef.current;
+          for (const i of L.insideRect(toScene(m.x0, m.y0), toScene(m.x1, m.y1))) L.selected.add(i);
+        }
+        cv.requestRenderAll();
+        return;
+      }
+      if (drawing && start && end) {
+        const isLine = drawing instanceof Line;
+        cv.remove(drawing);
+        const dx = end.x - start.x,
+          dy = end.y - start.y;
+        if (isLine && Math.hypot(dx, dy) >= 2) {
+          layerRef.current.add({
+            type: "line",
+            x1: start.x,
+            y1: start.y,
+            x2: end.x,
+            y2: end.y,
+            color: drawColor,
+            w: 2,
+          });
+          log("Linea creata");
+        } else if (!isLine && Math.abs(dx) >= 2 && Math.abs(dy) >= 2) {
+          layerRef.current.add({
+            type: "rect",
+            x: Math.min(start.x, end.x),
+            y: Math.min(start.y, end.y),
+            w: Math.abs(dx),
+            h: Math.abs(dy),
+            color: drawColor,
+            sw: 2,
+          });
+          log("Rettangolo creato");
+        }
         drawing = null;
-        start = null;
+        start = end = null;
+        cv.requestRenderAll();
       }
     });
     const wheel = (e: WheelEvent) => {
@@ -316,6 +334,7 @@ export default function CadEditor() {
     host.addEventListener("wheel", wheel, { passive: false });
     const ro = new ResizeObserver(() => {
       cv.setDimensions({ width: host.clientWidth, height: host.clientHeight });
+      cv.requestRenderAll();
     });
     ro.observe(host);
 
@@ -390,7 +409,7 @@ export default function CadEditor() {
     if (!cv) return;
     setLoading("Generazione DXF sul server…");
     setTimeout(() => {
-      const blob = new Blob([toDxf(cv.getObjects())], { type: "application/dxf" });
+      const blob = new Blob([toDxf(layerRef.current.toEnts())], { type: "application/dxf" });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
       a.download = fileName.replace(/\.(dwg|dxf)$/i, "") + "_modificato.dxf";
@@ -623,17 +642,4 @@ export default function CadEditor() {
       </div>
     </div>
   );
-}
-
-function FabricObject_style(_cv: Canvas) {
-  // selection highlight
-  Rect.ownDefaults.borderColor =
-    Line.ownDefaults.borderColor =
-    FabricText.ownDefaults.borderColor =
-      "#3b9cff";
-  Rect.ownDefaults.borderScaleFactor =
-    Line.ownDefaults.borderScaleFactor =
-    FabricText.ownDefaults.borderScaleFactor =
-      2;
-  Rect.ownDefaults.padding = Line.ownDefaults.padding = FabricText.ownDefaults.padding = 4;
 }
