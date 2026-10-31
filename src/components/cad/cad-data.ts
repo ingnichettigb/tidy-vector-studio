@@ -1,6 +1,6 @@
 import type { FabricObject } from "fabric";
 
-export type Tool = "select" | "pan" | "line" | "rect";
+export type Tool = "select" | "pan" | "line" | "rect" | "erase";
 
 // Drawing ink colors (CAD entity colors, also mapped to DXF ACI indexes)
 export const PALETTE = [

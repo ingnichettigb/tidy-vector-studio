@@ -5,6 +5,7 @@ import {
   Hand,
   Minus,
   Square,
+  Eraser,
   Trash2,
   ZoomIn,
   ZoomOut,
@@ -22,6 +23,10 @@ const lock = {
   lockMovementY: true,
   hasControls: false,
   hoverCursor: "pointer",
+  // Lines and rectangles are hit only near their stroke, so the empty inside of a room
+  // does not select (or erase) the whole wall rectangle around it.
+  perPixelTargetFind: true,
+  targetFindTolerance: 6,
 };
 
 export default function CadEditor() {
@@ -49,12 +54,13 @@ export default function CadEditor() {
     setTool(t);
     const cv = cvRef.current;
     if (!cv) return;
-    cv.selection = false;
+    // Drag on empty space draws the selection box only in select mode.
+    cv.selection = t === "select";
     cv.discardActiveObject();
     cv.defaultCursor = t === "pan" ? "grab" : t === "select" ? "default" : "crosshair";
     cv.forEachObject((o) => {
       o.selectable = t === "select";
-      o.evented = t === "select";
+      o.evented = t === "select" || t === "erase";
     });
     cv.requestRenderAll();
   }, []);
@@ -140,6 +146,7 @@ export default function CadEditor() {
             fontFamily: "JetBrains Mono, monospace",
             angle: e.angle ?? 0,
             ...lock,
+            perPixelTargetFind: false, // text: the whole text box is clickable
           });
         objs.push(o);
       });
@@ -161,8 +168,8 @@ export default function CadEditor() {
       log("Nessun elemento selezionato");
       return;
     }
-    sel.forEach((o) => cv.remove(o));
     cv.discardActiveObject();
+    sel.forEach((o) => cv.remove(o));
     cv.requestRenderAll();
     log(sel.length > 1 ? `${sel.length} elementi eliminati` : "Elemento eliminato");
   }, [log]);
@@ -175,6 +182,9 @@ export default function CadEditor() {
       width: host.clientWidth,
       height: host.clientHeight,
       selection: false,
+      // "Window" selection: only elements fully inside the box are picked, so a box drawn
+      // inside a room does not also grab the big wall rectangles around it.
+      selectionFullyContained: true,
       backgroundColor: "transparent",
       selectionColor: "rgba(80,160,255,0.15)",
     });
@@ -184,11 +194,33 @@ export default function CadEditor() {
     let drawing: FabricObject | null = null,
       start: Point | null = null,
       panning = false,
+      erasing = false,
+      erased = 0,
       last = { x: 0, y: 0 };
+
+    const eraseTarget = (o?: FabricObject) => {
+      if (!o) return;
+      cv.remove(o);
+      erased++;
+      cv.requestRenderAll();
+    };
+
+    // A selection made with the box must not be draggable: the drawing is edited only by deleting.
+    const lockSelection = () => {
+      cv.getActiveObject()?.set({ lockMovementX: true, lockMovementY: true, hasControls: false });
+    };
+    cv.on("selection:created", lockSelection);
+    cv.on("selection:updated", lockSelection);
 
     cv.on("mouse:down", (opt) => {
       const t = toolRef.current;
       const ev = opt.e as MouseEvent;
+      if (t === "erase" && ev.button !== 1) {
+        erasing = true;
+        erased = 0;
+        eraseTarget(opt.target);
+        return;
+      }
       if (t === "pan" || ev.button === 1) {
         panning = true;
         last = { x: ev.clientX, y: ev.clientY };
@@ -234,6 +266,10 @@ export default function CadEditor() {
         cv.setViewportTransform(vpt);
         return;
       }
+      if (erasing) {
+        eraseTarget(opt.target);
+        return;
+      }
       if (!drawing || !start) return;
       const p = cv.getScenePoint(ev);
       if (drawing instanceof Line) drawing.set({ x2: p.x, y2: p.y });
@@ -251,6 +287,11 @@ export default function CadEditor() {
       if (panning) {
         panning = false;
         cv.setCursor(toolRef.current === "pan" ? "grab" : "default");
+        return;
+      }
+      if (erasing) {
+        erasing = false;
+        if (erased) log(erased > 1 ? `${erased} elementi cancellati` : "Elemento cancellato");
         return;
       }
       if (drawing) {
@@ -296,6 +337,16 @@ export default function CadEditor() {
         deleteSelected();
       }
       if (e.key === "Escape") applyTool("select");
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const shortcut: Record<string, Tool> = {
+        s: "select",
+        l: "line",
+        r: "rect",
+        e: "erase",
+        p: "pan",
+      };
+      const t = shortcut[e.key.toLowerCase()];
+      if (t) applyTool(t);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -364,6 +415,9 @@ export default function CadEditor() {
     } else if (["rettangolo", "rett", "rect", "r"].includes(c)) {
       applyTool("rect");
       log("Comando RETTANGOLO attivo");
+    } else if (["gomma", "erase", "e"].includes(c)) {
+      applyTool("erase");
+      log("GOMMA attiva: clicca o trascina sugli elementi");
     } else if (["pan", "mano", "p"].includes(c)) {
       applyTool("pan");
       log("Modalità PAN attiva");
@@ -385,7 +439,8 @@ export default function CadEditor() {
   };
 
   const tools: { id: Tool; icon: typeof Hand; label: string }[] = [
-    { id: "select", icon: MousePointer2, label: "Seleziona (S)" },
+    { id: "select", icon: MousePointer2, label: "Seleziona / riquadro (S)" },
+    { id: "erase", icon: Eraser, label: "Gomma: clicca o trascina per cancellare (E)" },
     { id: "line", icon: Minus, label: "Linea (L)" },
     { id: "rect", icon: Square, label: "Rettangolo (R)" },
   ];
@@ -426,7 +481,7 @@ export default function CadEditor() {
             <input
               value={cmd}
               onChange={(e) => setCmd(e.target.value)}
-              placeholder="linea, rett, canc, pan, ze, rosso…"
+              placeholder="linea, rett, gomma, canc, pan, ze, rosso…"
               className="flex-1 bg-transparent outline-none placeholder:text-muted-foreground/60"
               aria-label="Linea di comando"
             />
