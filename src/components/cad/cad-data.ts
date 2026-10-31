@@ -1,5 +1,3 @@
-import type { FabricObject } from "fabric";
-
 export type Tool = "select" | "pan" | "line" | "rect" | "erase";
 
 // Drawing ink colors (CAD entity colors, also mapped to DXF ACI indexes)
@@ -13,6 +11,7 @@ export const PALETTE = [
 
 export type Ent =
   | { type: "line"; x1: number; y1: number; x2: number; y2: number; color: string; w?: number }
+  | { type: "poly"; pts: { x: number; y: number }[]; color: string; w?: number }
   | { type: "rect"; x: number; y: number; w: number; h: number; color: string; sw?: number }
   | {
       type: "text";
@@ -138,7 +137,7 @@ function aci(color: string) {
 }
 const n = (v: number) => v.toFixed(3);
 
-export function toDxf(objs: FabricObject[]): string {
+export function toDxf(ents: Ent[]): string {
   const out: string[] = [
     "0",
     "SECTION",
@@ -172,54 +171,37 @@ export function toDxf(objs: FabricObject[]): string {
       "21",
       n(-y2),
     );
-  for (const o of objs) {
-    const t = o.type;
-    if (t === "line") {
-      const l = o as unknown as { x1: number; y1: number; x2: number; y2: number; stroke: string };
-      line(l.x1, l.y1, l.x2, l.y2, aci(l.stroke));
-    } else if (t === "rect") {
-      const r = o as unknown as {
-        left: number;
-        top: number;
-        width: number;
-        height: number;
-        stroke: string;
-      };
-      const c = aci(r.stroke),
-        x = r.left,
-        y = r.top,
-        w = r.width,
-        h = r.height;
-      line(x, y, x + w, y, c);
-      line(x + w, y, x + w, y + h, c);
-      line(x + w, y + h, x, y + h, c);
-      line(x, y + h, x, y, c);
-    } else if (t === "text") {
-      const s = o as unknown as {
-        left: number;
-        top: number;
-        text: string;
-        fontSize: number;
-        fill: string;
-        angle: number;
-      };
+  for (const e of ents) {
+    if (e.type === "line") {
+      line(e.x1, e.y1, e.x2, e.y2, aci(e.color));
+    } else if (e.type === "poly") {
+      const c = aci(e.color);
+      for (let i = 1; i < e.pts.length; i++)
+        line(e.pts[i - 1]!.x, e.pts[i - 1]!.y, e.pts[i]!.x, e.pts[i]!.y, c);
+    } else if (e.type === "rect") {
+      const c = aci(e.color);
+      line(e.x, e.y, e.x + e.w, e.y, c);
+      line(e.x + e.w, e.y, e.x + e.w, e.y + e.h, c);
+      line(e.x + e.w, e.y + e.h, e.x, e.y + e.h, c);
+      line(e.x, e.y + e.h, e.x, e.y, c);
+    } else {
       out.push(
         "0",
         "TEXT",
         "8",
         "0",
         "62",
-        String(aci(s.fill)),
+        String(aci(e.color)),
         "10",
-        n(s.left),
+        n(e.x),
         "20",
-        n(-(s.top + s.fontSize)),
+        n(-(e.y + e.size)),
         "40",
-        n(s.fontSize * 0.8),
+        n(e.size * 0.8),
         "1",
-        s.text,
+        e.text,
         "50",
-        n(-(s.angle || 0)),
+        n(-(e.angle || 0)),
       );
     }
   }
