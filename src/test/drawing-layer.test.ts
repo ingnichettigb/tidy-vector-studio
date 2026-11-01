@@ -42,12 +42,29 @@ describe("DrawingLayer picking", () => {
     expect(L.hitAt(5, 0, 2)).toBe(1);
   });
 
-  it("window selection takes only entities fully inside the box", () => {
+  it("selection box takes entities inside it or crossing its border", () => {
     const L = new DrawingLayer(room);
-    // box around the text and the line, but not the wall rectangle around them
-    const ids = L.insideRect({ x: 5, y: 5 }, { x: 95, y: 95 });
-    expect(ids.sort()).toEqual([1, 2, 3]);
-    expect(L.insideRect({ x: 15, y: 15 }, { x: 50, y: 40 })).toEqual([2]);
+    // box around everything but the wall rectangle's own outline: wall is not touched
+    expect(L.touchRect({ x: 5, y: 5 }, { x: 95, y: 95 }).sort()).toEqual([1, 2, 3]);
+    // box fully inside the room, in an empty spot: selects nothing (not the wall around it)
+    expect(L.touchRect({ x: 40, y: 10 }, { x: 55, y: 15 })).toEqual([]);
+    // box that only covers the left half of the horizontal line: partly inside still counts
+    expect(L.touchRect({ x: 0, y: 45 }, { x: 30, y: 55 }).sort()).toEqual([0, 1]);
+    // box crossing only the end of the polyline
+    expect(L.touchRect({ x: 75, y: 55 }, { x: 95, y: 65 })).toEqual([3]);
+  });
+
+  it("selects a diagonal line that crosses the box without any end point inside", () => {
+    const L = new DrawingLayer([
+      { type: "line", x1: 0, y1: 0, x2: 100, y2: 100, color: "#111111" },
+    ]);
+    expect(L.touchRect({ x: 40, y: 40 }, { x: 60, y: 60 })).toEqual([0]);
+    expect(L.touchRect({ x: 70, y: 10 }, { x: 90, y: 30 })).toEqual([]); // off the diagonal
+  });
+
+  it("selects text whose box overlaps the selection box", () => {
+    const L = new DrawingLayer(room);
+    expect(L.touchRect({ x: 40, y: 22 }, { x: 60, y: 30 })).toEqual([2]); // text spans x 20..44
   });
 });
 
@@ -69,6 +86,49 @@ describe("DrawingLayer editing", () => {
     L.remove(0);
     expect(L.bounds()).toMatchObject({ x1: 10, x2: 90 });
     expect(new DrawingLayer().bounds()).toBeNull();
+  });
+});
+
+describe("DrawingLayer undo / redo", () => {
+  it("undoes and redoes a deletion, restoring the entities where they were", () => {
+    const L = new DrawingLayer(room);
+    L.selected.add(1);
+    L.selected.add(2);
+    L.removeSelected();
+    expect(L.count).toBe(2);
+    expect(L.canUndo).toBe(true);
+    expect(L.undo()).toEqual({ kind: "remove", n: 2 });
+    expect(L.count).toBe(4);
+    expect(L.toEnts().map((e) => e.type)).toEqual(["rect", "line", "text", "poly"]);
+    expect(L.hitAt(50, 50, 3)).toBe(1); // picking works again
+    expect(L.redo()).toEqual({ kind: "remove", n: 2 });
+    expect(L.count).toBe(2);
+  });
+
+  it("undoes an added entity and a whole eraser stroke as one step", () => {
+    const L = new DrawingLayer(room);
+    L.addUndoable({ type: "line", x1: 0, y1: 0, x2: 5, y2: 5, color: "#111111" });
+    expect(L.count).toBe(5);
+    expect(L.undo()).toEqual({ kind: "add", n: 1 });
+    expect(L.count).toBe(4);
+    // an eraser stroke removes several entities live, then records them once
+    L.remove(1);
+    L.remove(3);
+    L.record("remove", [1, 3]);
+    expect(L.undo()).toEqual({ kind: "remove", n: 2 });
+    expect(L.count).toBe(4);
+  });
+
+  it("drops the redo history when a new change is made, and has nothing to undo on a new drawing", () => {
+    const L = new DrawingLayer(room);
+    L.selected.add(0);
+    L.removeSelected();
+    L.undo();
+    expect(L.canRedo).toBe(true);
+    L.addUndoable({ type: "line", x1: 0, y1: 0, x2: 1, y2: 1, color: "#111111" });
+    expect(L.canRedo).toBe(false);
+    expect(new DrawingLayer(room).canUndo).toBe(false);
+    expect(new DrawingLayer().undo()).toBeNull();
   });
 });
 

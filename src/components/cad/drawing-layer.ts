@@ -112,6 +112,69 @@ function addPath(ctx: CanvasRenderingContext2D, e: Ent) {
   }
 }
 
+/** Does the segment A-B touch or cross the rectangle (Liang-Barsky clipping)? */
+function segHitsRect(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+): boolean {
+  const dx = bx - ax,
+    dy = by - ay;
+  const p = [-dx, dx, -dy, dy],
+    q = [ax - x1, x2 - ax, ay - y1, y2 - ay];
+  let t0 = 0,
+    t1 = 1;
+  for (let i = 0; i < 4; i++) {
+    if (p[i] === 0) {
+      if (q[i]! < 0) return false;
+    } else {
+      const r = q[i]! / p[i]!;
+      if (p[i]! < 0) {
+        if (r > t1) return false;
+        if (r > t0) t0 = r;
+      } else {
+        if (r < t0) return false;
+        if (r < t1) t1 = r;
+      }
+    }
+  }
+  return true;
+}
+
+/** Does the entity's drawn geometry touch the rectangle (inside, or crossing its border)? */
+function touchesRect(e: Ent, x1: number, y1: number, x2: number, y2: number): boolean {
+  switch (e.type) {
+    case "line":
+      return segHitsRect(e.x1, e.y1, e.x2, e.y2, x1, y1, x2, y2);
+    case "poly": {
+      const p = e.pts;
+      for (let i = 1; i < p.length; i++)
+        if (segHitsRect(p[i - 1]!.x, p[i - 1]!.y, p[i]!.x, p[i]!.y, x1, y1, x2, y2)) return true;
+      return false;
+    }
+    case "rect": {
+      // Only the outline counts: a box drawn inside a room must not grab the wall around it.
+      const r = e.x + e.w,
+        b = e.y + e.h;
+      return (
+        segHitsRect(e.x, e.y, r, e.y, x1, y1, x2, y2) ||
+        segHitsRect(r, e.y, r, b, x1, y1, x2, y2) ||
+        segHitsRect(r, b, e.x, b, x1, y1, x2, y2) ||
+        segHitsRect(e.x, b, e.x, e.y, x1, y1, x2, y2)
+      );
+    }
+    case "text":
+      return true; // the caller already checked its bounding box overlaps the rectangle
+  }
+}
+
+type Action = { kind: "remove" | "add"; idx: number[] };
+
 type Bucket = { color: string; w: number; idx: number[] };
 
 export class DrawingLayer {
@@ -123,10 +186,23 @@ export class DrawingLayer {
   private strokes: Map<string, Bucket> | null = null;
   private texts: number[] = [];
 
+  /** Removed entities, kept so that a removal can be undone. */
+  private graveyard = new Map<number, Ent>();
+  private undoStack: Action[] = [];
+  private redoStack: Action[] = [];
+
   constructor(ents: Ent[] = []) {
     for (const e of ents) this.add(e);
   }
 
+  get canUndo() {
+    return this.undoStack.length > 0;
+  }
+  get canRedo() {
+    return this.redoStack.length > 0;
+  }
+
+  /** Low-level add (no history); used while loading. */
   add(e: Ent): number {
     const i = this.items.length;
     const b = entBounds(e);
@@ -137,8 +213,18 @@ export class DrawingLayer {
     return i;
   }
 
+  /** Add a user-made entity as one undoable step. */
+  addUndoable(e: Ent): number {
+    const i = this.add(e);
+    this.record("add", [i]);
+    return i;
+  }
+
+  /** Low-level remove (no history): lets the eraser take out entities live during a stroke. */
   remove(i: number): boolean {
-    if (!this.items[i]) return false;
+    const e = this.items[i];
+    if (!e) return false;
+    this.graveyard.set(i, e);
     this.items[i] = null;
     this.selected.delete(i);
     this.count--;
@@ -146,11 +232,54 @@ export class DrawingLayer {
     return true;
   }
 
+  private restore(i: number): boolean {
+    const e = this.graveyard.get(i);
+    if (!e || this.items[i]) return false;
+    this.items[i] = e;
+    this.graveyard.delete(i);
+    this.count++;
+    this.strokes = null;
+    return true;
+  }
+
+  /** Register already-performed changes as one undoable step. */
+  record(kind: Action["kind"], idx: number[]) {
+    if (!idx.length) return;
+    this.undoStack.push({ kind, idx });
+    this.redoStack = [];
+  }
+
+  /** Remove the selection as one undoable step; returns how many were removed. */
   removeSelected(): number {
-    let n = 0;
-    for (const i of [...this.selected]) if (this.remove(i)) n++;
+    const done: number[] = [];
+    for (const i of [...this.selected]) if (this.remove(i)) done.push(i);
     this.selected.clear();
+    this.record("remove", done);
+    return done.length;
+  }
+
+  private apply(a: Action, undo: boolean): number {
+    // undoing a removal restores; undoing an addition removes; redo is the opposite
+    const restoring = (a.kind === "remove") === undo;
+    let n = 0;
+    for (const i of a.idx) if (restoring ? this.restore(i) : this.remove(i)) n++;
     return n;
+  }
+
+  undo(): { kind: Action["kind"]; n: number } | null {
+    const a = this.undoStack.pop();
+    if (!a) return null;
+    this.redoStack.push(a);
+    this.selected.clear();
+    return { kind: a.kind, n: this.apply(a, true) };
+  }
+
+  redo(): { kind: Action["kind"]; n: number } | null {
+    const a = this.redoStack.pop();
+    if (!a) return null;
+    this.undoStack.push(a);
+    this.selected.clear();
+    return { kind: a.kind, n: this.apply(a, false) };
   }
 
   /** Alive entities, in drawing order (used for export). */
@@ -192,23 +321,21 @@ export class DrawingLayer {
     return -1;
   }
 
-  /** Window selection: entities lying entirely inside the rectangle. */
-  insideRect(a: { x: number; y: number }, b: { x: number; y: number }): number[] {
+  /** Selection box: entities inside the rectangle or crossing its border. */
+  touchRect(a: { x: number; y: number }, b: { x: number; y: number }): number[] {
     const x1 = Math.min(a.x, b.x),
       x2 = Math.max(a.x, b.x),
       y1 = Math.min(a.y, b.y),
       y2 = Math.max(a.y, b.y);
     const out: number[] = [];
     for (let i = 0; i < this.items.length; i++) {
-      if (!this.items[i]) continue;
+      const e = this.items[i];
+      if (!e) continue;
       const k = i * 4;
-      if (
-        this.bb[k]! >= x1 &&
-        this.bb[k + 2]! <= x2 &&
-        this.bb[k + 1]! >= y1 &&
-        this.bb[k + 3]! <= y2
-      )
-        out.push(i);
+      // cheap bounding-box test first, exact geometry only for what survives
+      if (this.bb[k + 2]! < x1 || this.bb[k]! > x2 || this.bb[k + 3]! < y1 || this.bb[k + 1]! > y2)
+        continue;
+      if (touchesRect(e, x1, y1, x2, y2)) out.push(i);
     }
     return out;
   }
