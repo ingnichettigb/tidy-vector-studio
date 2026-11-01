@@ -7,6 +7,8 @@ import {
   Square,
   Eraser,
   Trash2,
+  Undo2,
+  Redo2,
   ZoomIn,
   ZoomOut,
   Maximize,
@@ -44,8 +46,13 @@ export default function CadEditor() {
   const [fileName, setFileName] = useState("esempio_pianta.dwg");
   const [dragOver, setDragOver] = useState(false);
   const [zoom, setZoom] = useState(1);
+  const [hist, setHist] = useState({ undo: false, redo: false });
 
   const log = useCallback((m: string) => setHistory((h) => [...h, m].slice(-3)), []);
+  const syncHist = useCallback(
+    () => setHist({ undo: layerRef.current.canUndo, redo: layerRef.current.canRedo }),
+    [],
+  );
   useEffect(() => {
     colorRef.current = color;
   }, [color]);
@@ -93,9 +100,10 @@ export default function CadEditor() {
       if (!cv) return;
       layerRef.current = new DrawingLayer(typeof src === "number" ? buildMockDrawing(src) : src);
       zoomExtents();
+      syncHist();
       cv.requestRenderAll();
     },
-    [zoomExtents],
+    [zoomExtents, syncHist],
   );
 
   const deleteSelected = useCallback(() => {
@@ -107,8 +115,31 @@ export default function CadEditor() {
       return;
     }
     cv.requestRenderAll();
+    syncHist();
     log(n > 1 ? `${n} elementi eliminati` : "Elemento eliminato");
-  }, [log]);
+  }, [log, syncHist]);
+
+  const undo = useCallback(() => {
+    const r = layerRef.current.undo();
+    if (!r) {
+      log("Niente da annullare");
+      return;
+    }
+    cvRef.current?.requestRenderAll();
+    syncHist();
+    log(r.kind === "remove" ? `Annullata eliminazione (${r.n})` : "Annullato inserimento");
+  }, [log, syncHist]);
+
+  const redo = useCallback(() => {
+    const r = layerRef.current.redo();
+    if (!r) {
+      log("Niente da ripristinare");
+      return;
+    }
+    cvRef.current?.requestRenderAll();
+    syncHist();
+    log(r.kind === "remove" ? `Rifatta eliminazione (${r.n})` : "Rifatto inserimento");
+  }, [log, syncHist]);
 
   // init canvas
   useEffect(() => {
@@ -129,8 +160,15 @@ export default function CadEditor() {
       drawColor = "",
       panning = false,
       erasing = false,
-      erased = 0,
-      marquee: { x0: number; y0: number; x1: number; y1: number } | null = null,
+      erasedIdx: number[] = [],
+      marquee: {
+        x0: number;
+        y0: number;
+        x1: number;
+        y1: number;
+        hit: number;
+        shift: boolean;
+      } | null = null,
       last = { x: 0, y: 0 };
 
     // The drawing is painted by the DrawingLayer under Fabric's own objects (the preview),
@@ -158,7 +196,7 @@ export default function CadEditor() {
       const L = layerRef.current;
       const i = L.hitAt(x, y, 6 / cv.getZoom());
       if (i >= 0 && L.remove(i)) {
-        erased++;
+        erasedIdx.push(i);
         cv.requestRenderAll();
       }
     };
@@ -181,7 +219,7 @@ export default function CadEditor() {
       const ev = opt.e as MouseEvent;
       if (t === "erase" && ev.button !== 1) {
         erasing = true;
-        erased = 0;
+        erasedIdx = [];
         lastErase = null;
         sweepErase(ev);
         return;
@@ -193,22 +231,12 @@ export default function CadEditor() {
         return;
       }
       if (t === "select") {
-        const L = layerRef.current;
+        // A click selects what is under the pointer; a drag always draws the selection box,
+        // even when it starts on a line (dense drawings have a line under almost every pixel).
         const p = cv.getScenePoint(ev);
-        const i = L.hitAt(p.x, p.y, 6 / cv.getZoom());
-        if (i >= 0) {
-          if (ev.shiftKey && L.selected.has(i)) L.selected.delete(i);
-          else {
-            if (!ev.shiftKey) L.selected.clear();
-            L.selected.add(i);
-          }
-        } else {
-          // empty space: start a selection box (window selection)
-          if (!ev.shiftKey) L.selected.clear();
-          const v = cv.getViewportPoint(ev);
-          marquee = { x0: v.x, y0: v.y, x1: v.x, y1: v.y };
-        }
-        cv.requestRenderAll();
+        const v = cv.getViewportPoint(ev);
+        const hit = layerRef.current.hitAt(p.x, p.y, 6 / cv.getZoom());
+        marquee = { x0: v.x, y0: v.y, x1: v.x, y1: v.y, hit, shift: ev.shiftKey };
         return;
       }
       if (t === "line" || t === "rect") {
@@ -272,21 +300,41 @@ export default function CadEditor() {
       if (erasing) {
         erasing = false;
         lastErase = null;
-        if (erased) log(erased > 1 ? `${erased} elementi cancellati` : "Elemento cancellato");
+        const n = erasedIdx.length;
+        if (n) {
+          layerRef.current.record("remove", erasedIdx); // one undo step per eraser stroke
+          syncHist();
+          log(n > 1 ? `${n} elementi cancellati` : "Elemento cancellato");
+        }
         return;
       }
       if (marquee) {
         const m = marquee;
         marquee = null;
+        const L = layerRef.current;
         if (Math.abs(m.x1 - m.x0) > 3 || Math.abs(m.y1 - m.y0) > 3) {
+          // drag: selection box (inside or crossing)
           const vpt = cv.viewportTransform!;
           const toScene = (x: number, y: number) => ({
             x: (x - vpt[4]!) / vpt[0]!,
             y: (y - vpt[5]!) / vpt[3]!,
           });
-          const L = layerRef.current;
-          for (const i of L.insideRect(toScene(m.x0, m.y0), toScene(m.x1, m.y1))) L.selected.add(i);
-        }
+          if (!m.shift) L.selected.clear();
+          for (const i of L.touchRect(toScene(m.x0, m.y0), toScene(m.x1, m.y1))) L.selected.add(i);
+          if (L.selected.size)
+            log(
+              L.selected.size === 1
+                ? "1 elemento selezionato: premi Canc"
+                : `${L.selected.size} elementi selezionati: premi Canc`,
+            );
+        } else if (m.hit >= 0) {
+          // click on an element (shift toggles it in the current selection)
+          if (m.shift && L.selected.has(m.hit)) L.selected.delete(m.hit);
+          else {
+            if (!m.shift) L.selected.clear();
+            L.selected.add(m.hit);
+          }
+        } else if (!m.shift) L.selected.clear(); // click on empty space
         cv.requestRenderAll();
         return;
       }
@@ -296,7 +344,7 @@ export default function CadEditor() {
         const dx = end.x - start.x,
           dy = end.y - start.y;
         if (isLine && Math.hypot(dx, dy) >= 2) {
-          layerRef.current.add({
+          layerRef.current.addUndoable({
             type: "line",
             x1: start.x,
             y1: start.y,
@@ -307,7 +355,7 @@ export default function CadEditor() {
           });
           log("Linea creata");
         } else if (!isLine && Math.abs(dx) >= 2 && Math.abs(dy) >= 2) {
-          layerRef.current.add({
+          layerRef.current.addUndoable({
             type: "rect",
             x: Math.min(start.x, end.x),
             y: Math.min(start.y, end.y),
@@ -320,6 +368,7 @@ export default function CadEditor() {
         }
         drawing = null;
         start = end = null;
+        syncHist();
         cv.requestRenderAll();
       }
     });
@@ -356,7 +405,18 @@ export default function CadEditor() {
         deleteSelected();
       }
       if (e.key === "Escape") applyTool("select");
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+        const k = e.key.toLowerCase();
+        if (k === "z" && !e.shiftKey) {
+          e.preventDefault();
+          undo();
+        } else if (k === "y" || (k === "z" && e.shiftKey)) {
+          e.preventDefault();
+          redo();
+        }
+        return;
+      }
+      if (e.altKey) return;
       const shortcut: Record<string, Tool> = {
         s: "select",
         l: "line",
@@ -369,7 +429,7 @@ export default function CadEditor() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [deleteSelected, applyTool]);
+  }, [deleteSelected, applyTool, undo, redo]);
 
   const handleFile = async (f: File) => {
     const ext = f.name.split(".").pop()?.toLowerCase();
@@ -428,6 +488,8 @@ export default function CadEditor() {
       setColor(col.value);
       log(`Colore: ${col.label}`);
     } else if (["canc", "cancella", "del", "delete", "elimina"].includes(c)) deleteSelected();
+    else if (["annulla", "undo", "u"].includes(c)) undo();
+    else if (["ripeti", "redo"].includes(c)) redo();
     else if (["linea", "line", "l"].includes(c)) {
       applyTool("line");
       log("Comando LINEA attivo");
@@ -500,7 +562,7 @@ export default function CadEditor() {
             <input
               value={cmd}
               onChange={(e) => setCmd(e.target.value)}
-              placeholder="linea, rett, gomma, canc, pan, ze, rosso…"
+              placeholder="linea, rett, gomma, canc, annulla, pan, ze, rosso…"
               className="flex-1 bg-transparent outline-none placeholder:text-muted-foreground/60"
               aria-label="Linea di comando"
             />
@@ -550,6 +612,24 @@ export default function CadEditor() {
             className="grid h-11 w-11 place-items-center rounded-md text-destructive hover:bg-destructive/15"
           >
             <Trash2 className="h-5 w-5" />
+          </button>
+          <button
+            title="Annulla (Ctrl+Z)"
+            aria-label="Annulla"
+            onClick={undo}
+            disabled={!hist.undo}
+            className="grid h-11 w-11 place-items-center rounded-md text-foreground transition-colors hover:bg-accent disabled:opacity-30 disabled:hover:bg-transparent"
+          >
+            <Undo2 className="h-5 w-5" />
+          </button>
+          <button
+            title="Ripeti (Ctrl+Y)"
+            aria-label="Ripeti"
+            onClick={redo}
+            disabled={!hist.redo}
+            className="grid h-11 w-11 place-items-center rounded-md text-foreground transition-colors hover:bg-accent disabled:opacity-30 disabled:hover:bg-transparent"
+          >
+            <Redo2 className="h-5 w-5" />
           </button>
           <div className="my-2 h-px w-8 bg-border" />
           {PALETTE.map((p) => (
