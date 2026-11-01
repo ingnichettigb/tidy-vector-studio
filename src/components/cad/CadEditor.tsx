@@ -14,12 +14,22 @@ import {
   Maximize,
   Upload,
   Download,
+  ImageDown,
   Loader2,
   Terminal,
 } from "lucide-react";
 import { PALETTE, buildMockDrawing, toDxf, type Tool, type Ent } from "./cad-data";
 import { DrawingLayer } from "./drawing-layer";
 import { parseDxf } from "./dxf-import";
+import { cleanFileName, downloadBlob, pickFileToOpen, saveWithPicker } from "./save-file";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 // Rubber-band preview shown while drawing a new line/rectangle (the finished shape is
 // committed to the DrawingLayer on mouse up).
@@ -47,6 +57,16 @@ export default function CadEditor() {
   const [dragOver, setDragOver] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [hist, setHist] = useState({ undo: false, redo: false });
+  // where the open drawing came from (lets the save window start in the same folder)
+  const fileHandleRef = useRef<FileSystemFileHandle | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  // shown when the browser cannot let the user choose the folder: explains, waits for OK
+  const [saveNotice, setSaveNotice] = useState<{
+    blob: Blob;
+    name: string;
+    ext: string;
+    label: string;
+  } | null>(null);
 
   const log = useCallback((m: string) => setHistory((h) => [...h, m].slice(-3)), []);
   const syncHist = useCallback(
@@ -182,8 +202,11 @@ export default function CadEditor() {
         const x = Math.min(marquee.x0, marquee.x1),
           y = Math.min(marquee.y0, marquee.y1);
         ctx.save();
-        ctx.fillStyle = "rgba(80,160,255,0.15)";
-        ctx.strokeStyle = "#3b9cff";
+        // left -> right: window (only what is fully inside); right -> left: crossing (touched too)
+        const crossing = marquee.x1 < marquee.x0;
+        ctx.fillStyle = crossing ? "rgba(61,220,132,0.15)" : "rgba(80,160,255,0.15)";
+        ctx.strokeStyle = crossing ? "#3ddc84" : "#3b9cff";
+        ctx.setLineDash(crossing ? [6, 4] : []);
         ctx.lineWidth = 1;
         ctx.fillRect(x, y, Math.abs(marquee.x1 - marquee.x0), Math.abs(marquee.y1 - marquee.y0));
         ctx.strokeRect(x, y, Math.abs(marquee.x1 - marquee.x0), Math.abs(marquee.y1 - marquee.y0));
@@ -320,13 +343,17 @@ export default function CadEditor() {
             y: (y - vpt[5]!) / vpt[3]!,
           });
           if (!m.shift) L.selected.clear();
-          for (const i of L.touchRect(toScene(m.x0, m.y0), toScene(m.x1, m.y1))) L.selected.add(i);
-          if (L.selected.size)
+          const a = toScene(m.x0, m.y0),
+            b = toScene(m.x1, m.y1);
+          const crossing = m.x1 < m.x0;
+          for (const i of crossing ? L.touchRect(a, b) : L.insideRect(a, b)) L.selected.add(i);
+          const n = L.selected.size;
+          if (n)
             log(
-              L.selected.size === 1
-                ? "1 elemento selezionato: premi Canc"
-                : `${L.selected.size} elementi selezionati: premi Canc`,
+              `${n === 1 ? "1 elemento selezionato" : `${n} elementi selezionati`}` +
+                ` (${crossing ? "a contatto" : "tutto dentro"}): premi Canc`,
             );
+          else log(crossing ? "Nessun elemento toccato" : "Nessun elemento interamente dentro");
         } else if (m.hit >= 0) {
           // click on an element (shift toggles it in the current selection)
           if (m.shift && L.selected.has(m.hit)) L.selected.delete(m.hit);
@@ -431,7 +458,7 @@ export default function CadEditor() {
     return () => window.removeEventListener("keydown", onKey);
   }, [deleteSelected, applyTool, undo, redo]);
 
-  const handleFile = async (f: File) => {
+  const handleFile = async (f: File, handle: FileSystemFileHandle | null = null) => {
     const ext = f.name.split(".").pop()?.toLowerCase();
     if (ext === "dwg") {
       log("DWG binario: salvalo come DXF da AutoCAD/LibreCAD e riaprilo");
@@ -455,6 +482,7 @@ export default function CadEditor() {
       setLoading(`Disegno di ${ents.length} entità…`);
       await new Promise((r) => setTimeout(r, 30));
       setFileName(f.name);
+      fileHandleRef.current = handle;
       loadDrawing(ents);
       log(`${f.name}: ${ents.length} entità caricate`);
     } catch (err) {
@@ -464,20 +492,70 @@ export default function CadEditor() {
     }
   };
 
-  const exportDxf = () => {
-    const cv = cvRef.current;
-    if (!cv) return;
+  const baseName = () => fileName.replace(/\.(dwg|dxf)$/i, "");
+
+  /** Save a finished file: "Save as" window when the browser has one, otherwise ask, then download. */
+  const saveOutput = async (
+    blob: Blob,
+    o: { name: string; ext: string; mime: string; label: string },
+  ) => {
+    const result = await saveWithPicker(blob, {
+      suggestedName: o.name,
+      description: o.label,
+      mime: o.mime,
+      ext: o.ext,
+      startIn: fileHandleRef.current,
+    });
+    if (result === "saved") log(`${o.label} salvato`);
+    else if (result === "cancelled") log("Salvataggio annullato");
+    else setSaveNotice({ blob, name: o.name, ext: o.ext, label: o.label });
+  };
+
+  const confirmDownload = () => {
+    if (!saveNotice) return;
+    const name = cleanFileName(saveNotice.name, saveNotice.ext);
+    downloadBlob(saveNotice.blob, name);
+    log(`${saveNotice.label} scaricato: ${name}`);
+    setSaveNotice(null);
+  };
+
+  const exportDxf = async () => {
+    if (!cvRef.current) return;
     setLoading("Generazione DXF sul server…");
-    setTimeout(() => {
-      const blob = new Blob([toDxf(layerRef.current.toEnts())], { type: "application/dxf" });
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = fileName.replace(/\.(dwg|dxf)$/i, "") + "_modificato.dxf";
-      a.click();
-      URL.revokeObjectURL(a.href);
-      setLoading(null);
-      log("DXF esportato");
-    }, 800);
+    await new Promise((r) => setTimeout(r, 400)); // simulated server step; lets the loader paint
+    const blob = new Blob([toDxf(layerRef.current.toEnts())], { type: "application/dxf" });
+    setLoading(null);
+    await saveOutput(blob, {
+      name: baseName() + "_modificato.dxf",
+      ext: ".dxf",
+      mime: "application/dxf",
+      label: "DXF",
+    });
+  };
+
+  const exportPng = async () => {
+    if (!cvRef.current) return;
+    setLoading("Creazione immagine…");
+    await new Promise((r) => setTimeout(r, 30));
+    const blob = await layerRef.current.toPngBlob();
+    setLoading(null);
+    if (!blob) {
+      log("Niente da esportare: il disegno è vuoto");
+      return;
+    }
+    await saveOutput(blob, {
+      name: baseName() + ".png",
+      ext: ".png",
+      mime: "image/png",
+      label: "Immagine PNG (sfondo trasparente)",
+    });
+  };
+
+  /** "Carica DXF": system picker when available (keeps the folder), plain input otherwise. */
+  const openFile = async () => {
+    const r = await pickFileToOpen();
+    if (r === "unsupported") inputRef.current?.click();
+    else if (r) handleFile(r.file, r.handle);
   };
 
   const runCommand = (raw: string) => {
@@ -515,6 +593,7 @@ export default function CadEditor() {
       zoomBy(0.8);
       log("Zoom −");
     } else if (["esporta", "salva", "export"].includes(c)) exportDxf();
+    else if (["png", "immagine", "img"].includes(c)) exportPng();
     else log(`Comando sconosciuto: "${raw}"`);
     setCmd("");
   };
@@ -569,19 +648,30 @@ export default function CadEditor() {
           </form>
         </div>
         <div className="flex items-center gap-2 border-l border-border px-4">
-          <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border border-border px-3 py-2 text-sm hover:bg-accent">
+          <button
+            onClick={openFile}
+            className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm hover:bg-accent"
+          >
             <Upload className="h-4 w-4" /> Carica DXF
-            <input
-              type="file"
-              accept=".dxf"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) handleFile(f);
-                e.target.value = "";
-              }}
-            />
-          </label>
+          </button>
+          <input
+            ref={inputRef}
+            type="file"
+            accept=".dxf"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) handleFile(f);
+              e.target.value = "";
+            }}
+          />
+          <button
+            onClick={exportPng}
+            title="Salva come immagine PNG con sfondo trasparente"
+            className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm hover:bg-accent"
+          >
+            <ImageDown className="h-4 w-4" /> Esporta PNG
+          </button>
           <button
             onClick={exportDxf}
             className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
@@ -660,7 +750,18 @@ export default function CadEditor() {
             e.preventDefault();
             setDragOver(false);
             const f = e.dataTransfer.files[0];
-            if (f) handleFile(f);
+            // the handle must be requested synchronously, before the event ends
+            const item = e.dataTransfer.items[0] as
+              | (DataTransferItem & {
+                  getAsFileSystemHandle?: () => Promise<FileSystemHandle | null>;
+                })
+              | undefined;
+            const pending = item?.getAsFileSystemHandle?.();
+            if (f)
+              (pending ?? Promise.resolve(null)).then(
+                (h) => handleFile(f, h?.kind === "file" ? (h as FileSystemFileHandle) : null),
+                () => handleFile(f),
+              );
           }}
         >
           <canvas ref={elRef} />
@@ -720,6 +821,42 @@ export default function CadEditor() {
           </div>
         </main>
       </div>
+
+      <Dialog open={!!saveNotice} onOpenChange={(o) => !o && setSaveNotice(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Scegliere la cartella non è possibile</DialogTitle>
+            <DialogDescription>
+              Questo browser non permette di scegliere dove salvare. Il file verrà scaricato nella
+              cartella dei download (o in quella che hai impostato nel browser). Puoi cambiare il
+              nome qui sotto.
+            </DialogDescription>
+          </DialogHeader>
+          <input
+            value={saveNotice ? saveNotice.name.replace(/\.(dxf|png)$/i, "") : ""}
+            onChange={(e) => setSaveNotice((n) => (n ? { ...n, name: e.target.value + n.ext } : n))}
+            onKeyDown={(e) => e.key === "Enter" && confirmDownload()}
+            aria-label="Nome del file"
+            autoFocus
+            onFocus={(e) => e.currentTarget.select()}
+            className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-primary/40"
+          />
+          <DialogFooter>
+            <button
+              onClick={() => setSaveNotice(null)}
+              className="rounded-md border border-border px-4 py-2 text-sm hover:bg-accent"
+            >
+              Annulla
+            </button>
+            <button
+              onClick={confirmDownload}
+              className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+            >
+              OK, scarica
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

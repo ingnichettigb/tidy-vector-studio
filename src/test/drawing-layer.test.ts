@@ -54,6 +54,25 @@ describe("DrawingLayer picking", () => {
     expect(L.touchRect({ x: 75, y: 55 }, { x: 95, y: 65 })).toEqual([3]);
   });
 
+  it("window selection (left to right) takes only what is entirely inside the box", () => {
+    const L = new DrawingLayer(room);
+    // the whole room: everything is inside, the wall rectangle included
+    expect(L.insideRect({ x: -5, y: -5 }, { x: 105, y: 105 }).sort()).toEqual([0, 1, 2, 3]);
+    // box around the line but cutting the wall rectangle: only the line is entirely inside
+    expect(L.insideRect({ x: 5, y: 40 }, { x: 95, y: 60 })).toEqual([1]);
+    // a box that only covers half of the line takes nothing, unlike the crossing selection
+    expect(L.insideRect({ x: 0, y: 45 }, { x: 30, y: 55 })).toEqual([]);
+    expect(L.touchRect({ x: 0, y: 45 }, { x: 30, y: 55 }).sort()).toEqual([0, 1]);
+    // text must be fully inside too (it spans x 20..44)
+    expect(L.insideRect({ x: 15, y: 15 }, { x: 40, y: 40 })).toEqual([]);
+    expect(L.insideRect({ x: 15, y: 15 }, { x: 50, y: 40 })).toEqual([2]);
+  });
+
+  it("the drag direction does not matter for the corners, only the box does", () => {
+    const L = new DrawingLayer(room);
+    expect(L.insideRect({ x: 95, y: 60 }, { x: 5, y: 40 })).toEqual([1]);
+  });
+
   it("selects a diagonal line that crosses the box without any end point inside", () => {
     const L = new DrawingLayer([
       { type: "line", x1: 0, y1: 0, x2: 100, y2: 100, color: "#111111" },
