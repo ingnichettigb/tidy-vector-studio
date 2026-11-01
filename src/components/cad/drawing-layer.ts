@@ -321,7 +321,28 @@ export class DrawingLayer {
     return -1;
   }
 
-  /** Selection box: entities inside the rectangle or crossing its border. */
+  /** Window selection: only entities lying entirely inside the rectangle. */
+  insideRect(a: { x: number; y: number }, b: { x: number; y: number }): number[] {
+    const x1 = Math.min(a.x, b.x),
+      x2 = Math.max(a.x, b.x),
+      y1 = Math.min(a.y, b.y),
+      y2 = Math.max(a.y, b.y);
+    const out: number[] = [];
+    for (let i = 0; i < this.items.length; i++) {
+      if (!this.items[i]) continue;
+      const k = i * 4;
+      if (
+        this.bb[k]! >= x1 &&
+        this.bb[k + 2]! <= x2 &&
+        this.bb[k + 1]! >= y1 &&
+        this.bb[k + 3]! <= y2
+      )
+        out.push(i);
+    }
+    return out;
+  }
+
+  /** Crossing selection: entities inside the rectangle or touching its border. */
   touchRect(a: { x: number; y: number }, b: { x: number; y: number }): number[] {
     const x1 = Math.min(a.x, b.x),
       x2 = Math.max(a.x, b.x),
@@ -360,7 +381,13 @@ export class DrawingLayer {
   }
 
   /** Draw the whole drawing; `vpt` is the canvas viewport transform, w/h the canvas size. */
-  draw(ctx: CanvasRenderingContext2D, vpt: ArrayLike<number>, w: number, h: number) {
+  draw(
+    ctx: CanvasRenderingContext2D,
+    vpt: ArrayLike<number>,
+    w: number,
+    h: number,
+    strokeScale = 1,
+  ) {
     this.build();
     const z = vpt[0]!;
     const vx1 = -vpt[4]! / z,
@@ -374,7 +401,7 @@ export class DrawingLayer {
     ctx.lineJoin = "round";
     for (const b of this.strokes!.values()) {
       ctx.strokeStyle = b.color;
-      ctx.lineWidth = b.w / z; // constant width on screen
+      ctx.lineWidth = (b.w * strokeScale) / z; // constant width on screen
       ctx.beginPath();
       for (const i of b.idx) {
         const e = this.items[i];
@@ -433,6 +460,29 @@ export class DrawingLayer {
       } else ctx.fillText(e.text, e.x, e.y);
     }
     ctx.restore();
+  }
+
+  /**
+   * Render the whole drawing to a PNG with a transparent background (no grid, no selection).
+   * The longest side is `maxSide` pixels; returns null when the drawing is empty.
+   */
+  toPngBlob(maxSide = 3000, pad = 24): Promise<Blob | null> {
+    const b = this.bounds();
+    if (!b) return Promise.resolve(null);
+    const bw = b.x2 - b.x1 || 1,
+      bh = b.y2 - b.y1 || 1;
+    const z = (maxSide - pad * 2) / Math.max(bw, bh);
+    const W = Math.max(1, Math.ceil(bw * z + pad * 2)),
+      H = Math.max(1, Math.ceil(bh * z + pad * 2));
+    const canvas = document.createElement("canvas");
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return Promise.resolve(null);
+    // thicker strokes on a big image so lines stay readable when the picture is scaled down
+    const strokeScale = Math.max(1, Math.min(3, z * 0.6));
+    this.draw(ctx, [z, 0, 0, z, pad - b.x1 * z, pad - b.y1 * z], W, H, strokeScale);
+    return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/png"));
   }
 
   /** Highlight the selected entities (drawn above everything else). */
