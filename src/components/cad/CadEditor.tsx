@@ -144,6 +144,22 @@ export default function CadEditor() {
     setEditMarker(e && e.type === "marker" ? { i: only, n: e.n } : null);
   }, []);
 
+  /** Write a new number into a circled number; `done` also drops the selection highlight. */
+  const applyMarkerNumber = useCallback(
+    (i: number, raw: string, done: boolean) => {
+      const v = raw.trim();
+      const L = layerRef.current;
+      if (v && L.setMarkerNumber(i, v)) {
+        syncHist();
+        log(`Numero cambiato in ${v}`);
+      }
+      if (done) L.selected.clear();
+      cvRef.current?.requestRenderAll();
+      syncMarker();
+    },
+    [log, syncHist, syncMarker],
+  );
+
   const applyTool = useCallback((t: Tool) => {
     toolRef.current = t;
     setTool(t);
@@ -1065,21 +1081,20 @@ export default function CadEditor() {
                   key={editMarker.i + ":" + editMarker.n}
                   defaultValue={editMarker.n}
                   aria-label="Cambia numero"
-                  title="Scrivi il nuovo numero e premi Invio"
+                  title="Scrivi il nuovo numero e premi Invio (o clicca fuori)"
                   onFocus={(e) => e.currentTarget.select()}
                   onKeyDown={(e) => {
-                    if (e.key !== "Enter") return;
-                    const v = e.currentTarget.value.trim();
-                    if (v && layerRef.current.setMarkerNumber(editMarker.i, v)) {
-                      cvRef.current?.requestRenderAll();
-                      syncHist();
-                      syncMarker();
-                      log(`Numero cambiato in ${v}`);
+                    if (e.key === "Enter")
+                      applyMarkerNumber(editMarker.i, e.currentTarget.value, true);
+                    else if (e.key === "Escape") {
+                      e.currentTarget.value = editMarker.n; // cancel: keep the old number
+                      e.currentTarget.blur();
                     }
-                    e.currentTarget.blur();
                   }}
+                  onBlur={(e) => applyMarkerNumber(editMarker.i, e.currentTarget.value, false)}
                   className="w-14 rounded border border-border bg-background px-2 py-1 text-center font-mono text-foreground outline-none focus:border-primary"
                 />
+                <span className="text-[10px] opacity-70">Invio per applicare</span>
               </label>
             )}
             {tool === "marker" && (
