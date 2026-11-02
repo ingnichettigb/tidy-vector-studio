@@ -1,3 +1,4 @@
+// Pulizia DWG - revisione 2 novembre 2026
 import { entWidth, markerFontSize, withWidth, type Ent } from "./cad-data";
 
 /**
@@ -230,7 +231,9 @@ type WidthChange = { i: number; from: number; to: number };
 type Action =
   | { kind: "remove" | "add"; idx: number[] }
   | { kind: "width"; changes: WidthChange[] }
-  | { kind: "trim"; removed: number[]; added: number[] };
+  | { kind: "trim"; removed: number[]; added: number[] }
+  | { kind: "move"; idx: number[]; dx: number; dy: number }
+  | { kind: "edit"; changes: { i: number; from: Ent; to: Ent }[] };
 
 type Bucket = { color: string; w: number; idx: number[] };
 
@@ -338,6 +341,43 @@ export class DrawingLayer {
     return changes.length;
   }
 
+  /** Replace an entity in place (keeps its index and refreshes its bounds). */
+  private setItem(i: number, e: Ent) {
+    this.items[i] = e;
+    const b = entBounds(e);
+    this.bb[i * 4] = b[0];
+    this.bb[i * 4 + 1] = b[1];
+    this.bb[i * 4 + 2] = b[2];
+    this.bb[i * 4 + 3] = b[3];
+    this.strokes = null;
+  }
+
+  /** Move entities with no history (live while dragging); call `recordMove` when done. */
+  translate(idx: Iterable<number>, dx: number, dy: number) {
+    for (const i of idx) {
+      const e = this.items[i];
+      if (e) this.setItem(i, moveEnt(e, dx, dy));
+    }
+  }
+
+  /** Register a finished drag as one undoable step. */
+  recordMove(idx: number[], dx: number, dy: number) {
+    if (!idx.length || (!dx && !dy)) return;
+    this.undoStack.push({ kind: "move", idx, dx, dy });
+    this.redoStack = [];
+  }
+
+  /** Change the number written in a circled number (undoable). */
+  setMarkerNumber(i: number, n: string): boolean {
+    const e = this.items[i];
+    if (!e || e.type !== "marker" || e.n === n) return false;
+    const to: Ent = { ...e, n };
+    this.setItem(i, to);
+    this.undoStack.push({ kind: "edit", changes: [{ i, from: e, to }] });
+    this.redoStack = [];
+    return true;
+  }
+
   /** Copies of the selected entities (for copy / paste). */
   copySelected(): Ent[] {
     const out: Ent[] = [];
@@ -441,6 +481,15 @@ export class DrawingLayer {
   }
 
   private apply(a: Action, undo: boolean): number {
+    if (a.kind === "move") {
+      const k = undo ? -1 : 1;
+      this.translate(a.idx, a.dx * k, a.dy * k);
+      return a.idx.length;
+    }
+    if (a.kind === "edit") {
+      for (const c of a.changes) this.setItem(c.i, undo ? c.from : c.to);
+      return a.changes.length;
+    }
     if (a.kind === "trim") {
       const [off, on] = undo ? [a.added, a.removed] : [a.removed, a.added];
       for (const i of off) this.remove(i);

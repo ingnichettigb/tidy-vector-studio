@@ -1,4 +1,5 @@
-export type Tool = "select" | "pan" | "line" | "rect" | "erase" | "marker" | "trim";
+// Pulizia DWG - revisione 2 novembre 2026
+export type Tool = "select" | "pan" | "line" | "rect" | "erase" | "marker" | "trim" | "move";
 
 // Drawing ink colors (CAD entity colors, also mapped to DXF ACI indexes)
 export const PALETTE = [

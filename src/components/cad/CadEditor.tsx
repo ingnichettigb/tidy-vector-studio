@@ -1,3 +1,4 @@
+// Pulizia DWG - revisione 2 novembre 2026
 import { useCallback, useEffect, useRef, useState, type ComponentType } from "react";
 import { Canvas, Line, Rect, Point, type FabricObject } from "fabric";
 import {
@@ -7,6 +8,7 @@ import {
   Square,
   Eraser,
   Scissors,
+  Move,
   Copy,
   ClipboardPaste,
   Trash2,
@@ -112,6 +114,8 @@ export default function CadEditor() {
   }, []);
   // copy / paste: what was copied, and how many times it has been pasted (offset grows each time)
   const clipRef = useRef<{ ents: Ent[]; pastes: number } | null>(null);
+  // the circled number currently selected on its own: its number can be changed from the top bar
+  const [editMarker, setEditMarker] = useState<{ i: number; n: string } | null>(null);
   const [hist, setHist] = useState({ undo: false, redo: false });
   // where the open drawing came from (lets the save window start in the same folder)
   const fileHandleRef = useRef<FileSystemFileHandle | null>(null);
@@ -133,13 +137,22 @@ export default function CadEditor() {
     colorRef.current = color;
   }, [color]);
 
+  const syncMarker = useCallback(() => {
+    const L = layerRef.current;
+    const only = L.selected.size === 1 ? [...L.selected][0]! : -1;
+    const e = only >= 0 ? L.items[only] : null;
+    setEditMarker(e && e.type === "marker" ? { i: only, n: e.n } : null);
+  }, []);
+
   const applyTool = useCallback((t: Tool) => {
     toolRef.current = t;
     setTool(t);
+    setEditMarker(null);
     const cv = cvRef.current;
     if (!cv) return;
     layerRef.current.selected.clear();
-    cv.defaultCursor = t === "pan" ? "grab" : t === "select" ? "default" : "crosshair";
+    cv.defaultCursor =
+      t === "pan" ? "grab" : t === "select" ? "default" : t === "move" ? "move" : "crosshair";
     cv.requestRenderAll();
   }, []);
 
@@ -192,8 +205,9 @@ export default function CadEditor() {
     }
     cv.requestRenderAll();
     syncHist();
+    syncMarker();
     log(n > 1 ? `${n} elementi eliminati` : "Elemento eliminato");
-  }, [log, syncHist]);
+  }, [log, syncHist, syncMarker]);
 
   const copySelected = useCallback(() => {
     const ents = layerRef.current.copySelected();
@@ -218,8 +232,9 @@ export default function CadEditor() {
     const n = layerRef.current.paste(clip.ents, off, off);
     cv.requestRenderAll();
     syncHist();
+    syncMarker();
     log(n === 1 ? "1 elemento incollato" : `${n} elementi incollati`);
-  }, [log, syncHist]);
+  }, [log, syncHist, syncMarker]);
 
   const undo = useCallback(() => {
     const r = layerRef.current.undo();
@@ -229,16 +244,17 @@ export default function CadEditor() {
     }
     cvRef.current?.requestRenderAll();
     syncHist();
-    log(
-      r.kind === "remove"
-        ? `Annullata eliminazione (${r.n})`
-        : r.kind === "width"
-          ? `Annullata modifica spessore (${r.n})`
-          : r.kind === "trim"
-            ? "Annullato taglio"
-            : "Annullato inserimento",
-    );
-  }, [log, syncHist]);
+    syncMarker();
+    const msg: Record<string, string> = {
+      remove: `Annullata eliminazione (${r.n})`,
+      width: `Annullata modifica spessore (${r.n})`,
+      trim: "Annullato taglio",
+      move: "Annullato spostamento",
+      edit: "Annullata modifica del numero",
+      add: "Annullato inserimento",
+    };
+    log(msg[r.kind]!);
+  }, [log, syncHist, syncMarker]);
 
   const redo = useCallback(() => {
     const r = layerRef.current.redo();
@@ -248,16 +264,17 @@ export default function CadEditor() {
     }
     cvRef.current?.requestRenderAll();
     syncHist();
-    log(
-      r.kind === "remove"
-        ? `Rifatta eliminazione (${r.n})`
-        : r.kind === "width"
-          ? `Rifatta modifica spessore (${r.n})`
-          : r.kind === "trim"
-            ? "Rifatto taglio"
-            : "Rifatto inserimento",
-    );
-  }, [log, syncHist]);
+    syncMarker();
+    const msg: Record<string, string> = {
+      remove: `Rifatta eliminazione (${r.n})`,
+      width: `Rifatta modifica spessore (${r.n})`,
+      trim: "Rifatto taglio",
+      move: "Rifatto spostamento",
+      edit: "Rifatta modifica del numero",
+      add: "Rifatto inserimento",
+    };
+    log(msg[r.kind]!);
+  }, [log, syncHist, syncMarker]);
 
   const chooseThickness = useCallback(
     (px: number) => {
@@ -292,6 +309,7 @@ export default function CadEditor() {
       drawColor = "",
       panning = false,
       erasing = false,
+      moving: { x: number; y: number; dx: number; dy: number; idx: number[] } | null = null,
       erasedIdx: number[] = [],
       marquee: {
         x0: number;
@@ -363,6 +381,26 @@ export default function CadEditor() {
         panning = true;
         last = { x: ev.clientX, y: ev.clientY };
         cv.setCursor("grabbing");
+        return;
+      }
+      if (t === "move") {
+        // drag an element (or the whole selection, when the element is part of it)
+        const p = cv.getScenePoint(ev);
+        const L = layerRef.current;
+        const hit = L.hitAt(p.x, p.y, 6 / cv.getZoom());
+        if (hit < 0) {
+          L.selected.clear();
+          syncMarker();
+          cv.requestRenderAll();
+          return;
+        }
+        if (!L.selected.has(hit)) {
+          L.selected.clear();
+          L.selected.add(hit);
+        }
+        moving = { x: p.x, y: p.y, dx: 0, dy: 0, idx: [...L.selected] };
+        cv.setCursor("grabbing");
+        cv.requestRenderAll();
         return;
       }
       if (t === "select") {
@@ -438,6 +476,18 @@ export default function CadEditor() {
         sweepErase(ev);
         return;
       }
+      if (moving) {
+        const p = cv.getScenePoint(ev);
+        const dx = p.x - moving.x,
+          dy = p.y - moving.y;
+        layerRef.current.translate(moving.idx, dx, dy);
+        moving.x = p.x;
+        moving.y = p.y;
+        moving.dx += dx;
+        moving.dy += dy;
+        cv.requestRenderAll();
+        return;
+      }
       if (marquee) {
         const v = cv.getViewportPoint(ev);
         marquee.x1 = v.x;
@@ -462,6 +512,19 @@ export default function CadEditor() {
       if (panning) {
         panning = false;
         cv.setCursor(toolRef.current === "pan" ? "grab" : "default");
+        return;
+      }
+      if (moving) {
+        const m = moving;
+        moving = null;
+        cv.setCursor("move");
+        layerRef.current.recordMove(m.idx, m.dx, m.dy);
+        syncHist();
+        syncMarker();
+        if (m.dx || m.dy)
+          log(m.idx.length > 1 ? `${m.idx.length} elementi spostati` : "Elemento spostato");
+        else
+          log(m.idx.length === 1 ? "Elemento selezionato" : `${m.idx.length} elementi selezionati`);
         return;
       }
       if (erasing) {
@@ -506,6 +569,7 @@ export default function CadEditor() {
             L.selected.add(m.hit);
           }
         } else if (!m.shift) L.selected.clear(); // click on empty space
+        syncMarker();
         cv.requestRenderAll();
         return;
       }
@@ -602,6 +666,7 @@ export default function CadEditor() {
         p: "pan",
         n: "marker",
         t: "trim",
+        m: "move",
       };
       const t = shortcut[e.key.toLowerCase()];
       if (t) applyTool(t);
@@ -720,7 +785,10 @@ export default function CadEditor() {
     } else if (["canc", "cancella", "del", "delete", "elimina"].includes(c)) deleteSelected();
     else if (["copia", "copy", "co"].includes(c)) copySelected();
     else if (["incolla", "paste", "in"].includes(c)) pasteClipboard();
-    else if (["trim", "taglia", "tr"].includes(c)) {
+    else if (["sposta", "move", "m"].includes(c)) {
+      applyTool("move");
+      log("SPOSTA attivo: trascina un elemento (o la selezione) dove vuoi");
+    } else if (["trim", "taglia", "tr"].includes(c)) {
       applyTool("trim");
       log("TRIM attivo: clicca la parte di linea da tagliare fino agli incroci");
     } else if (["annulla", "undo", "u"].includes(c)) undo();
@@ -763,6 +831,7 @@ export default function CadEditor() {
     { id: "erase", icon: Eraser, label: "Gomma: clicca o trascina per cancellare (E)" },
     { id: "line", icon: Minus, label: "Linea (L)" },
     { id: "rect", icon: Square, label: "Rettangolo (R)" },
+    { id: "move", icon: Move, label: "Sposta: trascina un elemento o la selezione (M)" },
     {
       id: "trim",
       icon: Scissors,
@@ -811,7 +880,7 @@ export default function CadEditor() {
             <input
               value={cmd}
               onChange={(e) => setCmd(e.target.value)}
-              placeholder="linea, rett, numero, trim, copia, incolla, gomma, canc, annulla…"
+              placeholder="linea, rett, numero, sposta, trim, copia, incolla, canc, annulla…"
               className="flex-1 bg-transparent outline-none placeholder:text-muted-foreground/60"
               aria-label="Linea di comando"
             />
@@ -989,6 +1058,30 @@ export default function CadEditor() {
                 </button>
               ))}
             </div>
+            {editMarker && (tool === "select" || tool === "move") && (
+              <label className="flex items-center gap-1.5 border-l border-border pl-3 text-muted-foreground">
+                Numero
+                <input
+                  key={editMarker.i + ":" + editMarker.n}
+                  defaultValue={editMarker.n}
+                  aria-label="Cambia numero"
+                  title="Scrivi il nuovo numero e premi Invio"
+                  onFocus={(e) => e.currentTarget.select()}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter") return;
+                    const v = e.currentTarget.value.trim();
+                    if (v && layerRef.current.setMarkerNumber(editMarker.i, v)) {
+                      cvRef.current?.requestRenderAll();
+                      syncHist();
+                      syncMarker();
+                      log(`Numero cambiato in ${v}`);
+                    }
+                    e.currentTarget.blur();
+                  }}
+                  className="w-14 rounded border border-border bg-background px-2 py-1 text-center font-mono text-foreground outline-none focus:border-primary"
+                />
+              </label>
+            )}
             {tool === "marker" && (
               <div className="flex items-center gap-2 border-l border-border pl-3">
                 <label className="flex items-center gap-1.5 text-muted-foreground">

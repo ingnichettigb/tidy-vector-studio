@@ -1,3 +1,4 @@
+// Pulizia DWG - revisione 2 novembre 2026
 import DxfParser from "dxf-parser";
 import { lineweightToWidth, type Ent } from "./cad-data";
 

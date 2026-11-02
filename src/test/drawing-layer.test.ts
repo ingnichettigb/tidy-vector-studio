@@ -1,3 +1,4 @@
+// Pulizia DWG - revisione 2 novembre 2026
 import { describe, expect, it } from "vitest";
 
 import {
@@ -333,5 +334,43 @@ describe("copy / paste and trim", () => {
     const d = new DrawingLayer([L(0, 0, 100, 0)]);
     expect(d.trimAt(50, 0, 3)).toBe(false);
     expect(d.count).toBe(1);
+  });
+});
+
+describe("move and change a circled number", () => {
+  const mk = (): Ent => ({ type: "marker", x: 10, y: 10, r: 5, n: "00", color: "#111" });
+
+  it("moves entities and undoes / redoes the whole drag as one step", () => {
+    const d = new DrawingLayer([mk(), { type: "line", x1: 0, y1: 0, x2: 4, y2: 0, color: "#111" }]);
+    d.translate([0, 1], 3, 4); // live drag, in pieces
+    d.translate([0, 1], 2, 1);
+    d.recordMove([0, 1], 5, 5);
+    expect(d.items[0]).toMatchObject({ x: 15, y: 15 });
+    expect(d.items[1]).toMatchObject({ x1: 5, y1: 5, x2: 9, y2: 5 });
+    expect(d.hitAt(15, 15, 1)).toBe(0); // picking follows the new position
+    expect(d.hitAt(10, 10, 1)).toBe(-1);
+    d.undo();
+    expect(d.items[0]).toMatchObject({ x: 10, y: 10 });
+    expect(d.items[1]).toMatchObject({ x1: 0, y1: 0 });
+    d.redo();
+    expect(d.items[0]).toMatchObject({ x: 15, y: 15 });
+  });
+
+  it("does not record a drag that did not move", () => {
+    const d = new DrawingLayer([mk()]);
+    d.recordMove([0], 0, 0);
+    expect(d.canUndo).toBe(false);
+  });
+
+  it("changes the number, ignores a same value or a non-number, and undoes", () => {
+    const d = new DrawingLayer([mk(), { type: "line", x1: 0, y1: 0, x2: 4, y2: 0, color: "#111" }]);
+    expect(d.setMarkerNumber(0, "00")).toBe(false);
+    expect(d.setMarkerNumber(1, "07")).toBe(false);
+    expect(d.setMarkerNumber(0, "12")).toBe(true);
+    expect(d.items[0]).toMatchObject({ n: "12" });
+    d.undo();
+    expect(d.items[0]).toMatchObject({ n: "00" });
+    d.redo();
+    expect(d.items[0]).toMatchObject({ n: "12" });
   });
 });
