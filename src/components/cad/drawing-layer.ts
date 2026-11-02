@@ -1,4 +1,4 @@
-import type { Ent } from "./cad-data";
+import { entWidth, markerFontSize, withWidth, type Ent } from "./cad-data";
 
 /**
  * The drawing as plain data plus a batch renderer.
@@ -16,8 +16,7 @@ const SELECT_COLOR = "#3b9cff";
 
 type TextEnt = Extract<Ent, { type: "text" }>;
 
-const strokeWidth = (e: Ent) =>
-  e.type === "rect" ? (e.sw ?? 1.5) : e.type === "text" ? 0 : (e.w ?? 1.5);
+const strokeWidth = (e: Ent) => (e.type === "text" ? 0 : (entWidth(e) ?? 1.5));
 
 function textBox(e: TextEnt) {
   return { w: e.text.length * e.size * TEXT_ADVANCE, h: e.size * TEXT_HEIGHT };
@@ -29,6 +28,45 @@ function distToSegment(px: number, py: number, ax: number, ay: number, bx: numbe
   const len2 = dx * dx + dy * dy;
   const t = len2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2)) : 0;
   return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+type Seg = [number, number, number, number];
+
+/** The straight pieces an entity is made of (markers and text have none). */
+function segmentsOf(e: Ent): Seg[] {
+  if (e.type === "line") return [[e.x1, e.y1, e.x2, e.y2]];
+  if (e.type === "rect") {
+    const r = e.x + e.w,
+      b = e.y + e.h;
+    return [
+      [e.x, e.y, r, e.y],
+      [r, e.y, r, b],
+      [r, b, e.x, b],
+      [e.x, b, e.x, e.y],
+    ];
+  }
+  if (e.type === "poly") {
+    const out: Seg[] = [];
+    for (let i = 1; i < e.pts.length; i++)
+      out.push([e.pts[i - 1]!.x, e.pts[i - 1]!.y, e.pts[i]!.x, e.pts[i]!.y]);
+    return out;
+  }
+  return [];
+}
+
+/** Where segment `a` is crossed by segment `b`, as a position 0..1 along `a` (null: no crossing). */
+function crossing(a: Seg, b: Seg): number | null {
+  const rx = a[2] - a[0],
+    ry = a[3] - a[1],
+    sx = b[2] - b[0],
+    sy = b[3] - b[1];
+  const den = rx * sy - ry * sx;
+  if (Math.abs(den) < 1e-12) return null; // parallel
+  const qx = b[0] - a[0],
+    qy = b[1] - a[1];
+  const t = (qx * sy - qy * sx) / den,
+    u = (qx * ry - qy * rx) / den;
+  return t >= 0 && t <= 1 && u >= 0 && u <= 1 ? t : null;
 }
 
 function entBounds(e: Ent): [number, number, number, number] {
@@ -55,6 +93,8 @@ function entBounds(e: Ent): [number, number, number, number] {
     }
     case "rect":
       return [e.x, e.y, e.x + e.w, e.y + e.h];
+    case "marker":
+      return [e.x - e.r, e.y - e.r, e.x + e.r, e.y + e.r];
     case "text": {
       const { w, h } = textBox(e);
       const a = ((e.angle ?? 0) * Math.PI) / 180,
@@ -87,6 +127,8 @@ function hitsEnt(e: Ent, x: number, y: number, tol: number): boolean {
         distToSegment(x, y, e.x, b, e.x, e.y) <= tol
       );
     }
+    case "marker": // the whole disc is clickable, not just the outline
+      return Math.hypot(x - e.x, y - e.y) <= e.r + tol;
     case "text": {
       const a = ((e.angle ?? 0) * Math.PI) / 180;
       const dx = x - e.x,
@@ -99,6 +141,13 @@ function hitsEnt(e: Ent, x: number, y: number, tol: number): boolean {
   }
 }
 
+function moveEnt(e: Ent, dx: number, dy: number): Ent {
+  if (e.type === "line")
+    return { ...e, x1: e.x1 + dx, y1: e.y1 + dy, x2: e.x2 + dx, y2: e.y2 + dy };
+  if (e.type === "poly") return { ...e, pts: e.pts.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
+  return { ...e, x: e.x + dx, y: e.y + dy };
+}
+
 function addPath(ctx: CanvasRenderingContext2D, e: Ent) {
   if (e.type === "line") {
     ctx.moveTo(e.x1, e.y1);
@@ -109,6 +158,9 @@ function addPath(ctx: CanvasRenderingContext2D, e: Ent) {
     for (let i = 1; i < p.length; i++) ctx.lineTo(p[i]!.x, p[i]!.y);
   } else if (e.type === "rect") {
     ctx.rect(e.x, e.y, e.w, e.h);
+  } else if (e.type === "marker") {
+    ctx.moveTo(e.x + e.r, e.y);
+    ctx.arc(e.x, e.y, e.r, 0, Math.PI * 2);
   }
 }
 
@@ -169,11 +221,16 @@ function touchesRect(e: Ent, x1: number, y1: number, x2: number, y2: number): bo
       );
     }
     case "text":
+    case "marker":
       return true; // the caller already checked its bounding box overlaps the rectangle
   }
 }
 
-type Action = { kind: "remove" | "add"; idx: number[] };
+type WidthChange = { i: number; from: number; to: number };
+type Action =
+  | { kind: "remove" | "add"; idx: number[] }
+  | { kind: "width"; changes: WidthChange[] }
+  | { kind: "trim"; removed: number[]; added: number[] };
 
 type Bucket = { color: string; w: number; idx: number[] };
 
@@ -185,6 +242,7 @@ export class DrawingLayer {
   private bb: number[] = []; // x1,y1,x2,y2 per item
   private strokes: Map<string, Bucket> | null = null;
   private texts: number[] = [];
+  private labels: number[] = []; // markers, whose number is drawn as text
 
   /** Removed entities, kept so that a removal can be undone. */
   private graveyard = new Map<number, Ent>();
@@ -243,7 +301,7 @@ export class DrawingLayer {
   }
 
   /** Register already-performed changes as one undoable step. */
-  record(kind: Action["kind"], idx: number[]) {
+  record(kind: "remove" | "add", idx: number[]) {
     if (!idx.length) return;
     this.undoStack.push({ kind, idx });
     this.redoStack = [];
@@ -258,7 +316,148 @@ export class DrawingLayer {
     return done.length;
   }
 
+  /**
+   * Set the line thickness of the selected entities (text has none) as one undoable step;
+   * returns how many were changed.
+   */
+  setSelectedWidth(w: number): number {
+    const changes: WidthChange[] = [];
+    for (const i of this.selected) {
+      const e = this.items[i];
+      const from = e ? entWidth(e) : undefined;
+      if (e && from !== undefined && from !== w) {
+        this.items[i] = withWidth(e, w);
+        changes.push({ i, from, to: w });
+      }
+    }
+    if (changes.length) {
+      this.strokes = null;
+      this.undoStack.push({ kind: "width", changes });
+      this.redoStack = [];
+    }
+    return changes.length;
+  }
+
+  /** Copies of the selected entities (for copy / paste). */
+  copySelected(): Ent[] {
+    const out: Ent[] = [];
+    for (const i of [...this.selected].sort((a, b) => a - b)) {
+      const e = this.items[i];
+      if (e) out.push(structuredClone(e));
+    }
+    return out;
+  }
+
+  /** Add copies of `ents` moved by (dx, dy) as one undoable step and select them. */
+  paste(ents: Ent[], dx: number, dy: number): number {
+    const idx: number[] = [];
+    for (const e of ents) idx.push(this.add(moveEnt(structuredClone(e), dx, dy)));
+    this.selected = new Set(idx);
+    this.record("add", idx);
+    return idx.length;
+  }
+
+  /**
+   * Trim: cut away the part of the line under (x, y) that lies between the nearest crossings
+   * with other lines on each side (like AutoCAD's TRIM). Rectangles and polylines are split
+   * into lines first. Returns false when nothing was cut (no crossing, or nothing under the point).
+   */
+  trimAt(x: number, y: number, tol: number): boolean {
+    const hit = this.hitAt(x, y, tol);
+    const e = hit >= 0 ? this.items[hit] : null;
+    if (!e || !segmentsOf(e).length) return false;
+    const segs = segmentsOf(e);
+    // the piece of this entity the pointer is on
+    let si = 0,
+      best = Infinity;
+    segs.forEach((s, k) => {
+      const d = distToSegment(x, y, s[0], s[1], s[2], s[3]);
+      if (d < best) {
+        best = d;
+        si = k;
+      }
+    });
+    const seg = segs[si]!;
+    const dx = seg[2] - seg[0],
+      dy = seg[3] - seg[1];
+    const len2 = dx * dx + dy * dy;
+    if (!len2) return false;
+    const tc = Math.max(0, Math.min(1, ((x - seg[0]) * dx + (y - seg[1]) * dy) / len2));
+    let lo = 0,
+      hi = 1,
+      found = false;
+    const minX = Math.min(seg[0], seg[2]),
+      maxX = Math.max(seg[0], seg[2]),
+      minY = Math.min(seg[1], seg[3]),
+      maxY = Math.max(seg[1], seg[3]);
+    const eps = 1e-6;
+    for (let j = 0; j < this.items.length; j++) {
+      const o = this.items[j];
+      if (!o) continue;
+      const k = j * 4;
+      if (
+        this.bb[k]! > maxX ||
+        this.bb[k + 2]! < minX ||
+        this.bb[k + 1]! > maxY ||
+        this.bb[k + 3]! < minY
+      )
+        continue;
+      const others = j === hit ? segs.filter((_, n) => n !== si) : segmentsOf(o);
+      for (const b of others) {
+        const t = crossing(seg, b);
+        if (t === null) continue;
+        if (t < tc - eps && t > lo) {
+          lo = t;
+          found = true;
+        } else if (t > tc + eps && t < hi) {
+          hi = t;
+          found = true;
+        }
+      }
+    }
+    if (!found) return false;
+    const at = (t: number) => [seg[0] + dx * t, seg[1] + dy * t] as const;
+    const w = entWidth(e) ?? 1.5;
+    const piece = (a: Seg): Ent => ({
+      type: "line",
+      x1: a[0],
+      y1: a[1],
+      x2: a[2],
+      y2: a[3],
+      color: e.color,
+      w,
+    });
+    const keep: Ent[] = [];
+    segs.forEach((s, n) => {
+      if (n !== si) keep.push(piece(s));
+    });
+    if (lo > eps) keep.push(piece([seg[0], seg[1], ...at(lo)]));
+    if (hi < 1 - eps) keep.push(piece([...at(hi), seg[2], seg[3]]));
+    this.remove(hit);
+    const added = keep.map((k) => this.add(k));
+    this.undoStack.push({ kind: "trim", removed: [hit], added });
+    this.redoStack = [];
+    return true;
+  }
+
   private apply(a: Action, undo: boolean): number {
+    if (a.kind === "trim") {
+      const [off, on] = undo ? [a.added, a.removed] : [a.removed, a.added];
+      for (const i of off) this.remove(i);
+      for (const i of on) this.restore(i);
+      return on.length;
+    }
+    if (a.kind === "width") {
+      let n = 0;
+      for (const c of a.changes) {
+        const e = this.items[c.i];
+        if (!e) continue;
+        this.items[c.i] = withWidth(e, undo ? c.from : c.to);
+        n++;
+      }
+      this.strokes = null;
+      return n;
+    }
     // undoing a removal restores; undoing an addition removes; redo is the opposite
     const restoring = (a.kind === "remove") === undo;
     let n = 0;
@@ -365,6 +564,7 @@ export class DrawingLayer {
     if (this.strokes) return;
     this.strokes = new Map();
     this.texts = [];
+    this.labels = [];
     for (let i = 0; i < this.items.length; i++) {
       const e = this.items[i];
       if (!e) continue;
@@ -372,6 +572,7 @@ export class DrawingLayer {
         this.texts.push(i);
         continue;
       }
+      if (e.type === "marker") this.labels.push(i); // circle goes below, number is drawn later
       const w = strokeWidth(e);
       const key = `${e.color}|${w}`;
       let b = this.strokes.get(key);
@@ -459,6 +660,21 @@ export class DrawingLayer {
         ctx.restore();
       } else ctx.fillText(e.text, e.x, e.y);
     }
+    // the number inside each circled-number marker
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (const i of this.labels) {
+      const e = this.items[i];
+      if (!e || e.type !== "marker") continue;
+      const size = markerFontSize(e.r, e.n);
+      if (size * z < 3) continue;
+      const k = i * 4;
+      if (bb[k + 2]! < vx1 || bb[k]! > vx2 || bb[k + 3]! < vy1 || bb[k + 1]! > vy2) continue;
+      ctx.font = `bold ${size}px "JetBrains Mono", monospace`;
+      ctx.fillStyle = e.color;
+      ctx.fillText(e.n, e.x, e.y + size * 0.06);
+    }
+    ctx.textAlign = "start";
     ctx.restore();
   }
 

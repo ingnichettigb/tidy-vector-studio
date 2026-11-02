@@ -1,4 +1,4 @@
-export type Tool = "select" | "pan" | "line" | "rect" | "erase";
+export type Tool = "select" | "pan" | "line" | "rect" | "erase" | "marker" | "trim";
 
 // Drawing ink colors (CAD entity colors, also mapped to DXF ACI indexes)
 export const PALETTE = [
@@ -12,6 +12,7 @@ export const PALETTE = [
 export type Ent =
   | { type: "line"; x1: number; y1: number; x2: number; y2: number; color: string; w?: number }
   | { type: "poly"; pts: { x: number; y: number }[]; color: string; w?: number }
+  | { type: "marker"; x: number; y: number; r: number; n: string; color: string; w?: number }
   | { type: "rect"; x: number; y: number; w: number; h: number; color: string; sw?: number }
   | {
       type: "text";
@@ -22,6 +23,42 @@ export type Ent =
       color: string;
       angle?: number;
     };
+
+/** Line thickness choices, in screen pixels. */
+export const THICKNESS = [1, 2, 3, 5, 8, 12];
+export const DEFAULT_THICKNESS = 3;
+
+// AutoCAD's standard lineweights, in hundredths of a millimetre (DXF group code 370)
+const LINEWEIGHTS = [
+  5, 9, 13, 15, 18, 20, 25, 30, 35, 40, 50, 53, 60, 70, 80, 90, 100, 106, 120, 140, 158, 200, 211,
+];
+const LW_PER_PX = 18; // 1 px of thickness = 0.18 mm on paper
+
+/** Thickness in screen px -> the nearest standard CAD lineweight. */
+export function widthToLineweight(px: number): number {
+  const target = px * LW_PER_PX;
+  return LINEWEIGHTS.reduce((a, b) => (Math.abs(b - target) < Math.abs(a - target) ? b : a));
+}
+
+/** CAD lineweight (negative = "by layer"/"default") -> thickness in screen px. */
+export function lineweightToWidth(lw: number | undefined): number {
+  return lw && lw > 0 ? Math.min(12, Math.max(1, Math.round(lw / LW_PER_PX))) : 1;
+}
+
+/** Thickness of an entity in px, or undefined for entities that have none (text). */
+export function entWidth(e: Ent): number | undefined {
+  return e.type === "text" ? undefined : e.type === "rect" ? (e.sw ?? 1.5) : (e.w ?? 1.5);
+}
+
+export function withWidth(e: Ent, w: number): Ent {
+  if (e.type === "text") return e;
+  return e.type === "rect" ? { ...e, sw: w } : { ...e, w };
+}
+
+/** Font size of the number inside a circled-number marker (shrinks for long numbers). */
+export function markerFontSize(r: number, n: string): number {
+  return Math.min(r, (1.7 * r) / (0.6 * Math.max(2, n.length)));
+}
 
 const W = "#111111",
   DIM = "#4da3ff",
@@ -138,73 +175,74 @@ function aci(color: string) {
 const n = (v: number) => v.toFixed(3);
 
 export function toDxf(ents: Ent[]): string {
-  const out: string[] = [
-    "0",
-    "SECTION",
-    "2",
-    "HEADER",
-    "9",
-    "$ACADVER",
-    "1",
-    "AC1009",
-    "0",
-    "ENDSEC",
-    "0",
-    "SECTION",
-    "2",
-    "ENTITIES",
-  ];
-  const line = (x1: number, y1: number, x2: number, y2: number, c: number) =>
-    out.push(
-      "0",
-      "LINE",
-      "8",
-      "0",
-      "62",
-      String(c),
-      "10",
-      n(x1),
-      "20",
-      n(-y1),
-      "11",
-      n(x2),
-      "21",
-      n(-y2),
-    );
+  const out: string[] = [];
+  const g = (code: number, value: string | number) => out.push(String(code), String(value));
+  // R2000 (AC1015) is the oldest DXF version that can store line thickness (group 370)
+  g(0, "SECTION");
+  g(2, "HEADER");
+  g(9, "$ACADVER");
+  g(1, "AC1015");
+  g(9, "$LWDISPLAY");
+  g(290, 1);
+  g(0, "ENDSEC");
+  g(0, "SECTION");
+  g(2, "ENTITIES");
+  const entity = (type: string, sub: string, c: number, w?: number) => {
+    g(0, type);
+    g(100, "AcDbEntity");
+    g(8, "0");
+    g(62, c);
+    if (w) g(370, widthToLineweight(w));
+    g(100, sub);
+  };
+  const point = (a: number, x: number, y: number) => {
+    g(10 + a, n(x));
+    g(20 + a, n(-y));
+    g(30 + a, "0.0");
+  };
+  const line = (x1: number, y1: number, x2: number, y2: number, c: number, w?: number) => {
+    entity("LINE", "AcDbLine", c, w);
+    point(0, x1, y1);
+    point(1, x2, y2);
+  };
   for (const e of ents) {
     if (e.type === "line") {
-      line(e.x1, e.y1, e.x2, e.y2, aci(e.color));
+      line(e.x1, e.y1, e.x2, e.y2, aci(e.color), e.w);
     } else if (e.type === "poly") {
       const c = aci(e.color);
       for (let i = 1; i < e.pts.length; i++)
-        line(e.pts[i - 1]!.x, e.pts[i - 1]!.y, e.pts[i]!.x, e.pts[i]!.y, c);
+        line(e.pts[i - 1]!.x, e.pts[i - 1]!.y, e.pts[i]!.x, e.pts[i]!.y, c, e.w);
     } else if (e.type === "rect") {
+      const c = aci(e.color),
+        r = e.x + e.w,
+        b = e.y + e.h;
+      line(e.x, e.y, r, e.y, c, e.sw);
+      line(r, e.y, r, b, c, e.sw);
+      line(r, b, e.x, b, c, e.sw);
+      line(e.x, b, e.x, e.y, c, e.sw);
+    } else if (e.type === "marker") {
       const c = aci(e.color);
-      line(e.x, e.y, e.x + e.w, e.y, c);
-      line(e.x + e.w, e.y, e.x + e.w, e.y + e.h, c);
-      line(e.x + e.w, e.y + e.h, e.x, e.y + e.h, c);
-      line(e.x, e.y + e.h, e.x, e.y, c);
+      entity("CIRCLE", "AcDbCircle", c, e.w);
+      point(0, e.x, e.y);
+      g(40, n(e.r));
+      // the number, centred in the circle (horizontal 72 = centre, vertical 73 = middle)
+      entity("TEXT", "AcDbText", c);
+      point(0, e.x, e.y);
+      g(40, n(markerFontSize(e.r, e.n) * 0.8));
+      g(1, e.n);
+      g(72, 1);
+      point(1, e.x, e.y);
+      g(100, "AcDbText");
+      g(73, 2);
     } else {
-      out.push(
-        "0",
-        "TEXT",
-        "8",
-        "0",
-        "62",
-        String(aci(e.color)),
-        "10",
-        n(e.x),
-        "20",
-        n(-(e.y + e.size)),
-        "40",
-        n(e.size * 0.8),
-        "1",
-        e.text,
-        "50",
-        n(-(e.angle || 0)),
-      );
+      entity("TEXT", "AcDbText", aci(e.color));
+      point(0, e.x, e.y + e.size);
+      g(40, n(e.size * 0.8));
+      g(1, e.text);
+      g(50, n(-(e.angle || 0)));
     }
   }
-  out.push("0", "ENDSEC", "0", "EOF");
+  g(0, "ENDSEC");
+  g(0, "EOF");
   return out.join("\n");
 }

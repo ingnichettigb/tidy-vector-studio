@@ -1,5 +1,5 @@
 import DxfParser from "dxf-parser";
-import type { Ent } from "./cad-data";
+import { lineweightToWidth, type Ent } from "./cad-data";
 
 const ACI: Record<number, string> = {
   1: "#ff4d4d",
@@ -37,10 +37,11 @@ export function parseDxf(text: string): Ent[] {
   const walk = (ents: AnyEnt[], tf: (p: P) => P, scale: number, depth: number) => {
     for (const e of ents ?? []) {
       const c = colorOf(e, layers);
+      const w = lineweightToWidth(e.lineweight);
       const seg = (a: P, b: P) => {
         const A = tf(a),
           B = tf(b);
-        out.push({ type: "line", x1: A.x, y1: -A.y, x2: B.x, y2: -B.y, color: c, w: 1 });
+        out.push({ type: "line", x1: A.x, y1: -A.y, x2: B.x, y2: -B.y, color: c, w });
       };
       // One entity per polyline/circle/arc instead of one per segment: far fewer entities.
       const poly = (pts: P[], closed = false) => {
@@ -58,11 +59,11 @@ export function parseDxf(text: string): Ent[] {
             x2: tp[1]!.x,
             y2: tp[1]!.y,
             color: c,
-            w: 1,
+            w,
           });
           return;
         }
-        out.push({ type: "poly", pts: tp, color: c, w: 1 });
+        out.push({ type: "poly", pts: tp, color: c, w });
       };
       const arc = (cx: number, cy: number, r: number, a0: number, a1: number) => {
         if (a1 < a0) a1 += Math.PI * 2;

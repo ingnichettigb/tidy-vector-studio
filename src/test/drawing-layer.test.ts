@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { toDxf, type Ent } from "@/components/cad/cad-data";
+import {
+  THICKNESS,
+  entWidth,
+  lineweightToWidth,
+  toDxf,
+  widthToLineweight,
+  type Ent,
+} from "@/components/cad/cad-data";
 import { DrawingLayer } from "@/components/cad/drawing-layer";
 import { parseDxf } from "@/components/cad/dxf-import";
 
@@ -151,6 +158,93 @@ describe("DrawingLayer undo / redo", () => {
   });
 });
 
+describe("circled numbers (markers)", () => {
+  const marker: Ent = { type: "marker", x: 50, y: 50, r: 10, n: "07", color: "#ff4d4d", w: 3 };
+
+  it("is clickable anywhere on its disc, and bounded by its circle", () => {
+    const L = new DrawingLayer([marker]);
+    expect(L.hitAt(50, 50, 2)).toBe(0); // centre, over the number
+    expect(L.hitAt(58, 50, 2)).toBe(0);
+    expect(L.hitAt(65, 50, 2)).toBe(-1);
+    expect(L.bounds()).toEqual({ x1: 40, y1: 40, x2: 60, y2: 60 });
+  });
+
+  it("is picked by the selection boxes like any other element", () => {
+    const L = new DrawingLayer([marker]);
+    expect(L.touchRect({ x: 55, y: 45 }, { x: 80, y: 55 })).toEqual([0]);
+    expect(L.insideRect({ x: 55, y: 45 }, { x: 80, y: 55 })).toEqual([]);
+    expect(L.insideRect({ x: 30, y: 30 }, { x: 70, y: 70 })).toEqual([0]);
+  });
+
+  it("can be placed, undone and redone like a drawn line", () => {
+    const L = new DrawingLayer();
+    L.addUndoable(marker);
+    expect(L.count).toBe(1);
+    expect(L.undo()).toEqual({ kind: "add", n: 1 });
+    expect(L.count).toBe(0);
+    expect(L.redo()).toEqual({ kind: "add", n: 1 });
+    expect(L.count).toBe(1);
+  });
+});
+
+describe("line thickness", () => {
+  it("changes only the selected elements that have a thickness, and undoes it", () => {
+    const L = new DrawingLayer(room);
+    L.selected.add(0); // rect
+    L.selected.add(1); // line
+    L.selected.add(2); // text: no thickness
+    L.selected.add(3); // poly
+    expect(L.setSelectedWidth(8)).toBe(3);
+    expect(L.items.map((e) => e && entWidth(e))).toEqual([8, 8, undefined, 8]);
+    expect(L.canUndo).toBe(true);
+    expect(L.undo()).toEqual({ kind: "width", n: 3 });
+    expect(L.items.map((e) => e && entWidth(e))).toEqual([1.5, 1.5, undefined, 1.5]);
+    expect(L.redo()).toEqual({ kind: "width", n: 3 });
+    expect(L.items[1]).toMatchObject({ type: "line", w: 8 });
+  });
+
+  it("does nothing, and records nothing, when the thickness is already that value", () => {
+    const L = new DrawingLayer([
+      { type: "line", x1: 0, y1: 0, x2: 5, y2: 5, color: "#111111", w: 3 },
+    ]);
+    L.selected.add(0);
+    expect(L.setSelectedWidth(3)).toBe(0);
+    expect(L.canUndo).toBe(false);
+  });
+
+  it("maps every choice to a standard CAD lineweight and back", () => {
+    for (const px of THICKNESS) expect(lineweightToWidth(widthToLineweight(px))).toBe(px);
+    expect(lineweightToWidth(undefined)).toBe(1);
+    expect(lineweightToWidth(-3)).toBe(1); // "default"/"by layer"
+  });
+});
+
+describe("DXF with thickness and circled numbers", () => {
+  const ents: Ent[] = [
+    { type: "line", x1: 0, y1: 0, x2: 100, y2: 0, color: "#111111", w: 5 },
+    { type: "marker", x: 50, y: 20, r: 8, n: "03", color: "#ff4d4d", w: 2 },
+  ];
+
+  it("writes an R2000 file that stores the lineweight of lines and circles", () => {
+    const dxf = toDxf(ents).split("\n");
+    expect(dxf[dxf.indexOf("$ACADVER") + 2]).toBe("AC1015");
+    expect(dxf.filter((l, i) => i % 2 === 1 && dxf[i - 1] === "370")).toEqual([
+      String(widthToLineweight(5)),
+      String(widthToLineweight(2)),
+    ]);
+    expect(dxf).toContain("CIRCLE");
+    expect(dxf).toContain("03");
+  });
+
+  it("reads the thickness back when the file is reopened", () => {
+    const back = parseDxf(toDxf(ents));
+    expect(back.find((e) => e.type === "line")).toMatchObject({ w: 5 });
+    // the circle comes back as a polyline of the same thickness, the number as text
+    expect(back.find((e) => e.type === "poly")).toMatchObject({ w: 2 });
+    expect(back.find((e) => e.type === "text")).toMatchObject({ text: "03" });
+  });
+});
+
 describe("DXF round trip", () => {
   it("exports lines, polylines, rectangles and text, and reads them back", () => {
     const dxf = toDxf(room);
@@ -170,5 +264,74 @@ describe("DXF round trip", () => {
     const ents = parseDxf(dxf);
     expect(ents).toHaveLength(1);
     expect(ents[0]).toMatchObject({ type: "poly" });
+  });
+});
+
+describe("copy / paste and trim", () => {
+  const L = (x1: number, y1: number, x2: number, y2: number): Ent => ({
+    type: "line",
+    x1,
+    y1,
+    x2,
+    y2,
+    color: "#111",
+    w: 3,
+  });
+
+  it("pastes copies moved by the offset, selects them, and undoes in one step", () => {
+    const d = new DrawingLayer([
+      L(0, 0, 10, 0),
+      { type: "marker", x: 5, y: 5, r: 4, n: "00", color: "#111" },
+    ]);
+    d.selected = new Set([0, 1]);
+    const clip = d.copySelected();
+    expect(d.paste(clip, 20, 30)).toBe(2);
+    expect(d.count).toBe(4);
+    expect(d.selected.size).toBe(2);
+    expect(d.items[2]).toMatchObject({ x1: 20, y1: 30, x2: 30, y2: 30 });
+    expect(d.items[3]).toMatchObject({ x: 25, y: 35, n: "00" });
+    expect(d.items[0]).toMatchObject({ x1: 0 }); // original untouched
+    d.undo();
+    expect(d.count).toBe(2);
+    d.redo();
+    expect(d.count).toBe(4);
+  });
+
+  it("trims a line between the two nearest crossings", () => {
+    const d = new DrawingLayer([L(0, 0, 100, 0), L(30, -10, 30, 10), L(70, -10, 70, 10)]);
+    expect(d.trimAt(50, 0, 3)).toBe(true);
+    const lines = d.toEnts().filter((e) => e.type === "line" && e.y1 === 0 && e.y2 === 0);
+    expect(lines).toHaveLength(2);
+    expect(lines).toMatchObject([
+      { x1: 0, x2: 30 },
+      { x1: 70, x2: 100 },
+    ]);
+    d.undo();
+    expect(d.toEnts()).toHaveLength(3);
+    expect(d.toEnts()[0]).toMatchObject({ x1: 0, x2: 100 });
+    d.redo();
+    expect(d.toEnts()).toHaveLength(4);
+  });
+
+  it("trims up to the end when there is a crossing on one side only", () => {
+    const d = new DrawingLayer([L(0, 0, 100, 0), L(30, -10, 30, 10)]);
+    expect(d.trimAt(80, 0, 3)).toBe(true);
+    const rest = d.toEnts().filter((e) => e.type === "line" && e.y1 === 0 && e.y2 === 0);
+    expect(rest).toMatchObject([{ x1: 0, x2: 30 }]);
+  });
+
+  it("splits a rectangle side and leaves the other sides", () => {
+    const d = new DrawingLayer([
+      { type: "rect", x: 0, y: 0, w: 100, h: 50, color: "#111", sw: 3 },
+      L(50, -20, 50, 20),
+    ]);
+    expect(d.trimAt(80, 0, 3)).toBe(true); // top side right of the crossing
+    expect(d.toEnts().filter((e) => e.type === "line")).toHaveLength(1 + 3 + 1);
+  });
+
+  it("does nothing without a crossing", () => {
+    const d = new DrawingLayer([L(0, 0, 100, 0)]);
+    expect(d.trimAt(50, 0, 3)).toBe(false);
+    expect(d.count).toBe(1);
   });
 });

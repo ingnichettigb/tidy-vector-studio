@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ComponentType } from "react";
 import { Canvas, Line, Rect, Point, type FabricObject } from "fabric";
 import {
   MousePointer2,
@@ -6,6 +6,9 @@ import {
   Minus,
   Square,
   Eraser,
+  Scissors,
+  Copy,
+  ClipboardPaste,
   Trash2,
   Undo2,
   Redo2,
@@ -18,7 +21,15 @@ import {
   Loader2,
   Terminal,
 } from "lucide-react";
-import { PALETTE, buildMockDrawing, toDxf, type Tool, type Ent } from "./cad-data";
+import {
+  DEFAULT_THICKNESS,
+  PALETTE,
+  THICKNESS,
+  buildMockDrawing,
+  toDxf,
+  type Tool,
+  type Ent,
+} from "./cad-data";
 import { DrawingLayer } from "./drawing-layer";
 import { parseDxf } from "./dxf-import";
 import { cleanFileName, downloadBlob, pickFileToOpen, saveWithPicker } from "./save-file";
@@ -37,9 +48,39 @@ const previewProps = {
   selectable: false,
   evented: false,
   hasControls: false,
-  strokeWidth: 2,
   strokeUniform: true,
 };
+
+// Radius of a circled number as seen on screen when it is placed (stored in drawing units).
+const MARKER_RADIUS_PX = { S: 11, M: 15, L: 21 } as const;
+type MarkerSize = keyof typeof MARKER_RADIUS_PX;
+
+function MarkerIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      aria-hidden
+    >
+      <circle cx="12" cy="12" r="9.5" />
+      <text
+        x="12"
+        y="16"
+        textAnchor="middle"
+        fontSize="11"
+        fontWeight="700"
+        fill="currentColor"
+        stroke="none"
+        fontFamily="monospace"
+      >
+        01
+      </text>
+    </svg>
+  );
+}
 
 export default function CadEditor() {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -56,6 +97,21 @@ export default function CadEditor() {
   const [fileName, setFileName] = useState("esempio_pianta.dwg");
   const [dragOver, setDragOver] = useState(false);
   const [zoom, setZoom] = useState(1);
+  // line thickness for new shapes, and for the selection when it is changed (screen px)
+  const [thickness, setThickness] = useState(DEFAULT_THICKNESS);
+  const thickRef = useRef(DEFAULT_THICKNESS);
+  // circled numbers: next number to place (00, 01, 02…) and size
+  const [markerNext, setMarkerNextState] = useState(0);
+  const markerNextRef = useRef(0);
+  const [markerSize, setMarkerSizeState] = useState<MarkerSize>("M");
+  const markerSizeRef = useRef<MarkerSize>("M");
+  const setMarkerNext = useCallback((n: number) => {
+    const v = Math.max(0, Math.floor(n) || 0);
+    markerNextRef.current = v;
+    setMarkerNextState(v);
+  }, []);
+  // copy / paste: what was copied, and how many times it has been pasted (offset grows each time)
+  const clipRef = useRef<{ ents: Ent[]; pastes: number } | null>(null);
   const [hist, setHist] = useState({ undo: false, redo: false });
   // where the open drawing came from (lets the save window start in the same folder)
   const fileHandleRef = useRef<FileSystemFileHandle | null>(null);
@@ -139,6 +195,32 @@ export default function CadEditor() {
     log(n > 1 ? `${n} elementi eliminati` : "Elemento eliminato");
   }, [log, syncHist]);
 
+  const copySelected = useCallback(() => {
+    const ents = layerRef.current.copySelected();
+    if (!ents.length) {
+      log("Niente da copiare: seleziona degli elementi");
+      return;
+    }
+    clipRef.current = { ents, pastes: 0 };
+    log(ents.length === 1 ? "1 elemento copiato" : `${ents.length} elementi copiati`);
+  }, [log]);
+
+  const pasteClipboard = useCallback(() => {
+    const cv = cvRef.current;
+    const clip = clipRef.current;
+    if (!cv || !clip) {
+      log("Niente da incollare: prima copia (Ctrl+C)");
+      return;
+    }
+    // each paste lands a bit further (~24 px on screen) so copies don't hide each other
+    clip.pastes++;
+    const off = (24 * clip.pastes) / cv.getZoom();
+    const n = layerRef.current.paste(clip.ents, off, off);
+    cv.requestRenderAll();
+    syncHist();
+    log(n === 1 ? "1 elemento incollato" : `${n} elementi incollati`);
+  }, [log, syncHist]);
+
   const undo = useCallback(() => {
     const r = layerRef.current.undo();
     if (!r) {
@@ -147,7 +229,15 @@ export default function CadEditor() {
     }
     cvRef.current?.requestRenderAll();
     syncHist();
-    log(r.kind === "remove" ? `Annullata eliminazione (${r.n})` : "Annullato inserimento");
+    log(
+      r.kind === "remove"
+        ? `Annullata eliminazione (${r.n})`
+        : r.kind === "width"
+          ? `Annullata modifica spessore (${r.n})`
+          : r.kind === "trim"
+            ? "Annullato taglio"
+            : "Annullato inserimento",
+    );
   }, [log, syncHist]);
 
   const redo = useCallback(() => {
@@ -158,8 +248,30 @@ export default function CadEditor() {
     }
     cvRef.current?.requestRenderAll();
     syncHist();
-    log(r.kind === "remove" ? `Rifatta eliminazione (${r.n})` : "Rifatto inserimento");
+    log(
+      r.kind === "remove"
+        ? `Rifatta eliminazione (${r.n})`
+        : r.kind === "width"
+          ? `Rifatta modifica spessore (${r.n})`
+          : r.kind === "trim"
+            ? "Rifatto taglio"
+            : "Rifatto inserimento",
+    );
   }, [log, syncHist]);
+
+  const chooseThickness = useCallback(
+    (px: number) => {
+      thickRef.current = px;
+      setThickness(px);
+      const n = layerRef.current.setSelectedWidth(px);
+      if (n) {
+        cvRef.current?.requestRenderAll();
+        syncHist();
+        log(`Spessore ${px} applicato a ${n} element${n === 1 ? "o" : "i"}`);
+      } else log(`Spessore ${px}`);
+    },
+    [log, syncHist],
+  );
 
   // init canvas
   useEffect(() => {
@@ -262,12 +374,43 @@ export default function CadEditor() {
         marquee = { x0: v.x, y0: v.y, x1: v.x, y1: v.y, hit, shift: ev.shiftKey };
         return;
       }
+      if (t === "trim") {
+        const p = cv.getScenePoint(ev);
+        if (layerRef.current.trimAt(p.x, p.y, 6 / cv.getZoom())) {
+          syncHist();
+          cv.requestRenderAll();
+          log("Linea tagliata fino agli incroci");
+        } else log("Niente da tagliare: clicca una linea che incrocia un'altra");
+        return;
+      }
+      if (t === "marker") {
+        const p = cv.getScenePoint(ev);
+        const n = String(markerNextRef.current).padStart(2, "0");
+        layerRef.current.addUndoable({
+          type: "marker",
+          x: p.x,
+          y: p.y,
+          r: MARKER_RADIUS_PX[markerSizeRef.current] / cv.getZoom(),
+          n,
+          color: colorRef.current,
+          w: thickRef.current,
+        });
+        setMarkerNext(markerNextRef.current + 1);
+        syncHist();
+        cv.requestRenderAll();
+        log(`Numero ${n} inserito`);
+        return;
+      }
       if (t === "line" || t === "rect") {
         start = end = cv.getScenePoint(ev);
         drawColor = colorRef.current;
         drawing =
           t === "line"
-            ? new Line([start.x, start.y, start.x, start.y], { stroke: drawColor, ...previewProps })
+            ? new Line([start.x, start.y, start.x, start.y], {
+                stroke: drawColor,
+                strokeWidth: thickRef.current,
+                ...previewProps,
+              })
             : new Rect({
                 left: start.x,
                 top: start.y,
@@ -275,6 +418,7 @@ export default function CadEditor() {
                 height: 0,
                 fill: "transparent",
                 stroke: drawColor,
+                strokeWidth: thickRef.current,
                 ...previewProps,
               });
         cv.add(drawing);
@@ -378,7 +522,7 @@ export default function CadEditor() {
             x2: end.x,
             y2: end.y,
             color: drawColor,
-            w: 2,
+            w: thickRef.current,
           });
           log("Linea creata");
         } else if (!isLine && Math.abs(dx) >= 2 && Math.abs(dy) >= 2) {
@@ -389,7 +533,7 @@ export default function CadEditor() {
             w: Math.abs(dx),
             h: Math.abs(dy),
             color: drawColor,
-            sw: 2,
+            sw: thickRef.current,
           });
           log("Rettangolo creato");
         }
@@ -440,6 +584,12 @@ export default function CadEditor() {
         } else if (k === "y" || (k === "z" && e.shiftKey)) {
           e.preventDefault();
           redo();
+        } else if (k === "c") {
+          e.preventDefault();
+          copySelected();
+        } else if (k === "v") {
+          e.preventDefault();
+          pasteClipboard();
         }
         return;
       }
@@ -450,13 +600,15 @@ export default function CadEditor() {
         r: "rect",
         e: "erase",
         p: "pan",
+        n: "marker",
+        t: "trim",
       };
       const t = shortcut[e.key.toLowerCase()];
       if (t) applyTool(t);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [deleteSelected, applyTool, undo, redo]);
+  }, [deleteSelected, applyTool, undo, redo, copySelected, pasteClipboard]);
 
   const handleFile = async (f: File, handle: FileSystemFileHandle | null = null) => {
     const ext = f.name.split(".").pop()?.toLowerCase();
@@ -566,7 +718,12 @@ export default function CadEditor() {
       setColor(col.value);
       log(`Colore: ${col.label}`);
     } else if (["canc", "cancella", "del", "delete", "elimina"].includes(c)) deleteSelected();
-    else if (["annulla", "undo", "u"].includes(c)) undo();
+    else if (["copia", "copy", "co"].includes(c)) copySelected();
+    else if (["incolla", "paste", "in"].includes(c)) pasteClipboard();
+    else if (["trim", "taglia", "tr"].includes(c)) {
+      applyTool("trim");
+      log("TRIM attivo: clicca la parte di linea da tagliare fino agli incroci");
+    } else if (["annulla", "undo", "u"].includes(c)) undo();
     else if (["ripeti", "redo"].includes(c)) redo();
     else if (["linea", "line", "l"].includes(c)) {
       applyTool("line");
@@ -577,6 +734,9 @@ export default function CadEditor() {
     } else if (["gomma", "erase", "e"].includes(c)) {
       applyTool("erase");
       log("GOMMA attiva: clicca o trascina sugli elementi");
+    } else if (["numero", "num", "n"].includes(c)) {
+      applyTool("marker");
+      log("NUMERO attivo: clicca per inserire un numero cerchiato");
     } else if (["pan", "mano", "p"].includes(c)) {
       applyTool("pan");
       log("Modalità PAN attiva");
@@ -598,11 +758,21 @@ export default function CadEditor() {
     setCmd("");
   };
 
-  const tools: { id: Tool; icon: typeof Hand; label: string }[] = [
+  const tools: { id: Tool; icon: ComponentType<{ className?: string }>; label: string }[] = [
     { id: "select", icon: MousePointer2, label: "Seleziona / riquadro (S)" },
     { id: "erase", icon: Eraser, label: "Gomma: clicca o trascina per cancellare (E)" },
     { id: "line", icon: Minus, label: "Linea (L)" },
     { id: "rect", icon: Square, label: "Rettangolo (R)" },
+    {
+      id: "trim",
+      icon: Scissors,
+      label: "Taglia (Trim): clicca la parte di linea da togliere (T)",
+    },
+    {
+      id: "marker",
+      icon: MarkerIcon,
+      label: "Numero cerchiato: clicca per inserire 00, 01, 02… (N)",
+    },
   ];
 
   return (
@@ -641,7 +811,7 @@ export default function CadEditor() {
             <input
               value={cmd}
               onChange={(e) => setCmd(e.target.value)}
-              placeholder="linea, rett, gomma, canc, annulla, pan, ze, rosso…"
+              placeholder="linea, rett, numero, trim, copia, incolla, gomma, canc, annulla…"
               className="flex-1 bg-transparent outline-none placeholder:text-muted-foreground/60"
               aria-label="Linea di comando"
             />
@@ -683,7 +853,7 @@ export default function CadEditor() {
 
       <div className="relative flex flex-1 overflow-hidden">
         {/* EDIT TOOLBAR */}
-        <aside className="z-10 flex w-16 shrink-0 flex-col items-center gap-1 border-r border-border bg-card py-3">
+        <aside className="z-10 flex w-16 shrink-0 flex-col items-center gap-1 overflow-y-auto border-r border-border bg-card py-3">
           {tools.map((t) => (
             <button
               key={t.id}
@@ -702,6 +872,22 @@ export default function CadEditor() {
             className="grid h-11 w-11 place-items-center rounded-md text-destructive hover:bg-destructive/15"
           >
             <Trash2 className="h-5 w-5" />
+          </button>
+          <button
+            title="Copia (Ctrl+C)"
+            aria-label="Copia"
+            onClick={copySelected}
+            className="grid h-11 w-11 place-items-center rounded-md text-foreground transition-colors hover:bg-accent"
+          >
+            <Copy className="h-5 w-5" />
+          </button>
+          <button
+            title="Incolla (Ctrl+V)"
+            aria-label="Incolla"
+            onClick={pasteClipboard}
+            className="grid h-11 w-11 place-items-center rounded-md text-foreground transition-colors hover:bg-accent"
+          >
+            <ClipboardPaste className="h-5 w-5" />
           </button>
           <button
             title="Annulla (Ctrl+Z)"
@@ -781,6 +967,67 @@ export default function CadEditor() {
               </div>
             </div>
           )}
+
+          {/* THICKNESS (and number options) */}
+          <div className="absolute left-1/2 top-3 z-10 flex -translate-x-1/2 items-center gap-3 rounded-lg border border-border bg-card/95 px-3 py-1.5 text-xs shadow-lg">
+            <div className="flex items-center gap-1" role="group" aria-label="Spessore linea">
+              <span className="mr-1 text-muted-foreground">Spessore</span>
+              {THICKNESS.map((px) => (
+                <button
+                  key={px}
+                  title={`Spessore ${px} px: vale per ciò che disegni e per gli elementi selezionati`}
+                  aria-label={`Spessore ${px}`}
+                  aria-pressed={thickness === px}
+                  onClick={() => chooseThickness(px)}
+                  className={`grid h-8 w-9 place-items-center rounded-md ${thickness === px ? "bg-primary/20 ring-1 ring-primary" : "hover:bg-accent"}`}
+                >
+                  <span
+                    className="block w-6 rounded-full bg-current"
+                    style={{ height: px }}
+                    aria-hidden
+                  />
+                </button>
+              ))}
+            </div>
+            {tool === "marker" && (
+              <div className="flex items-center gap-2 border-l border-border pl-3">
+                <label className="flex items-center gap-1.5 text-muted-foreground">
+                  Prossimo n°
+                  <input
+                    value={String(markerNext).padStart(2, "0")}
+                    onChange={(e) => setMarkerNext(parseInt(e.target.value.replace(/\D/g, ""), 10))}
+                    inputMode="numeric"
+                    aria-label="Prossimo numero"
+                    className="w-12 rounded-md border border-border bg-background px-1.5 py-1 text-center font-mono text-sm text-foreground outline-none focus:ring-2 focus:ring-primary/40"
+                  />
+                </label>
+                <button
+                  onClick={() => setMarkerNext(0)}
+                  title="Ricomincia da 00"
+                  className="rounded-md border border-border px-2 py-1 hover:bg-accent"
+                >
+                  Azzera
+                </button>
+                <div className="flex items-center gap-1" role="group" aria-label="Dimensione">
+                  {(Object.keys(MARKER_RADIUS_PX) as MarkerSize[]).map((sz) => (
+                    <button
+                      key={sz}
+                      title={`Dimensione ${sz}`}
+                      aria-label={`Dimensione ${sz}`}
+                      aria-pressed={markerSize === sz}
+                      onClick={() => {
+                        markerSizeRef.current = sz;
+                        setMarkerSizeState(sz);
+                      }}
+                      className={`h-8 w-8 rounded-md font-semibold ${markerSize === sz ? "bg-primary text-primary-foreground" : "hover:bg-accent"}`}
+                    >
+                      {sz}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* NAV CONTROLS (right side) */}
           <div className="absolute right-4 top-1/2 z-10 flex -translate-y-1/2 flex-col gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-lg">
