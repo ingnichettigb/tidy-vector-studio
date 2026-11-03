@@ -2,8 +2,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  MARKER_MM,
   THICKNESS,
   entWidth,
+  fitSheet,
+  sheetRatio,
+  sheetUnitsPerMm,
   lineweightToWidth,
   toDxf,
   widthToLineweight,
@@ -372,5 +376,53 @@ describe("move and change a circled number", () => {
     expect(d.items[0]).toMatchObject({ n: "00" });
     d.redo();
     expect(d.items[0]).toMatchObject({ n: "12" });
+  });
+});
+
+describe("A4 sheet", () => {
+  it("fits an A4 frame around the drawing, centred, with the A4 proportions", () => {
+    const b = { x1: 0, y1: 0, x2: 400, y2: 100 };
+    for (const land of [false, true]) {
+      const s = fitSheet(b, land);
+      expect(s.w / s.h).toBeCloseTo(sheetRatio(land), 6);
+      expect(s.x).toBeLessThan(0);
+      expect(s.x + s.w).toBeGreaterThan(400);
+      expect(s.y).toBeLessThan(0);
+      expect(s.y + s.h).toBeGreaterThan(100);
+      expect(s.x + s.w / 2).toBeCloseTo(200, 6);
+      expect(s.y + s.h / 2).toBeCloseTo(50, 6);
+    }
+    expect(sheetRatio(true)).toBeCloseTo(297 / 210, 6);
+  });
+
+  it("converts paper millimetres to drawing units", () => {
+    const s = fitSheet({ x1: 0, y1: 0, x2: 2100, y2: 100 }, false, 0); // 210 mm = 2100 units
+    expect(sheetUnitsPerMm(s)).toBeCloseTo(10, 6);
+    expect(MARKER_MM.M * sheetUnitsPerMm(s)).toBeCloseTo(35, 6);
+  });
+
+  it("gives every circled number the same radius, undoably", () => {
+    const m = (x: number, r: number): Ent => ({
+      type: "marker",
+      x,
+      y: 0,
+      r,
+      n: "00",
+      color: "#111",
+    });
+    const d = new DrawingLayer([
+      m(0, 3),
+      m(10, 9),
+      { type: "line", x1: 0, y1: 0, x2: 1, y2: 1, color: "#111" },
+    ]);
+    expect(d.setMarkersRadius(5)).toBe(2);
+    expect(d.items[0]).toMatchObject({ r: 5 });
+    expect(d.items[1]).toMatchObject({ r: 5 });
+    expect(d.setMarkersRadius(5)).toBe(0);
+    d.undo();
+    expect(d.items[0]).toMatchObject({ r: 3 });
+    expect(d.items[1]).toMatchObject({ r: 9 });
+    d.redo();
+    expect(d.items[1]).toMatchObject({ r: 5 });
   });
 });

@@ -1,5 +1,14 @@
 // Pulizia DWG - revisione 2 novembre 2026
-import { entWidth, markerFontSize, withWidth, type Ent } from "./cad-data";
+import {
+  A4_MM,
+  EXPORT_DPI,
+  PEN_MM_PER_PX,
+  entWidth,
+  markerFontSize,
+  withWidth,
+  type Ent,
+  type Sheet,
+} from "./cad-data";
 
 /**
  * The drawing as plain data plus a batch renderer.
@@ -748,6 +757,43 @@ export class DrawingLayer {
     const strokeScale = Math.max(1, Math.min(3, z * 0.6));
     this.draw(ctx, [z, 0, 0, z, pad - b.x1 * z, pad - b.y1 * z], W, H, strokeScale);
     return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/png"));
+  }
+
+  /**
+   * Render only what lies inside the A4 frame, at 300 dpi, transparent, without the frame itself.
+   * Pen widths follow the paper (0.1 mm per thickness step) so lines survive being scaled down.
+   */
+  toSheetPngBlob(sheet: Sheet): Promise<Blob | null> {
+    const mmW = sheet.land ? A4_MM.long : A4_MM.short,
+      mmH = sheet.land ? A4_MM.short : A4_MM.long;
+    const W = Math.round((mmW / 25.4) * EXPORT_DPI),
+      H = Math.round((mmH / 25.4) * EXPORT_DPI);
+    const canvas = document.createElement("canvas");
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return Promise.resolve(null);
+    const z = W / sheet.w;
+    const strokeScale = (PEN_MM_PER_PX / 25.4) * EXPORT_DPI;
+    this.draw(ctx, [z, 0, 0, z, -sheet.x * z, -sheet.y * z], W, H, strokeScale);
+    return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/png"));
+  }
+
+  /** Give every circled number the same radius (undoable); returns how many changed. */
+  setMarkersRadius(r: number): number {
+    const changes: { i: number; from: Ent; to: Ent }[] = [];
+    this.items.forEach((e, i) => {
+      if (e && e.type === "marker" && Math.abs(e.r - r) > 1e-9) {
+        const to: Ent = { ...e, r };
+        this.setItem(i, to);
+        changes.push({ i, from: e, to });
+      }
+    });
+    if (changes.length) {
+      this.undoStack.push({ kind: "edit", changes });
+      this.redoStack = [];
+    }
+    return changes.length;
   }
 
   /** Highlight the selected entities (drawn above everything else). */

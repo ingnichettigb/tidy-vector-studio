@@ -8,6 +8,7 @@ import {
   Square,
   Eraser,
   Scissors,
+  Frame,
   Move,
   Copy,
   ClipboardPaste,
@@ -25,12 +26,18 @@ import {
 } from "lucide-react";
 import {
   DEFAULT_THICKNESS,
+  MARKER_MM,
   PALETTE,
   THICKNESS,
+  A4_MM,
   buildMockDrawing,
+  fitSheet,
+  sheetRatio,
+  sheetUnitsPerMm,
   toDxf,
   type Tool,
   type Ent,
+  type Sheet,
 } from "./cad-data";
 import { DrawingLayer } from "./drawing-layer";
 import { parseDxf } from "./dxf-import";
@@ -116,6 +123,10 @@ export default function CadEditor() {
   const clipRef = useRef<{ ents: Ent[]; pastes: number } | null>(null);
   // the circled number currently selected on its own: its number can be changed from the top bar
   const [editMarker, setEditMarker] = useState<{ i: number; n: string } | null>(null);
+  // A4 export frame (scene coordinates); lives only on screen, never in the DXF
+  const sheetRef = useRef<Sheet | null>(null);
+  const [sheetOn, setSheetOn] = useState(false);
+  const [sheetLand, setSheetLand] = useState(false);
   const [hist, setHist] = useState({ undo: false, redo: false });
   // where the open drawing came from (lets the save window start in the same folder)
   const fileHandleRef = useRef<FileSystemFileHandle | null>(null);
@@ -143,6 +154,72 @@ export default function CadEditor() {
     const e = only >= 0 ? L.items[only] : null;
     setEditMarker(e && e.type === "marker" ? { i: only, n: e.n } : null);
   }, []);
+
+  /** Put the A4 frame around the whole drawing. */
+  const placeSheet = useCallback(
+    (land: boolean) => {
+      const b = layerRef.current.bounds();
+      if (!b) {
+        log("Disegno vuoto: niente da inquadrare");
+        return false;
+      }
+      const sh = fitSheet(b, land);
+      sheetRef.current = sh;
+      // zoom so the whole sheet is visible
+      const cv = cvRef.current;
+      if (cv) {
+        const pad = 70;
+        const z = Math.min((cv.getWidth() - pad * 2) / sh.w, (cv.getHeight() - pad * 2) / sh.h);
+        cv.setViewportTransform([
+          z,
+          0,
+          0,
+          z,
+          (cv.getWidth() - sh.w * z) / 2 - sh.x * z,
+          (cv.getHeight() - sh.h * z) / 2 - sh.y * z,
+        ]);
+        setZoom(z);
+        cv.requestRenderAll();
+      }
+      return true;
+    },
+    [log],
+  );
+
+  const toggleSheet = useCallback(() => {
+    if (sheetRef.current) {
+      sheetRef.current = null;
+      setSheetOn(false);
+      cvRef.current?.requestRenderAll();
+      log("Foglio A4 nascosto");
+    } else if (placeSheet(sheetLand)) {
+      setSheetOn(true);
+      log("Foglio A4: trascinalo dal bordo o dall'etichetta, allargalo dagli angoli");
+    }
+  }, [log, placeSheet, sheetLand]);
+
+  /** Turn the frame around keeping its centre and its scale (paper mm per drawing unit). */
+  const chooseOrientation = useCallback((land: boolean) => {
+    setSheetLand(land);
+    const sh = sheetRef.current;
+    if (!sh || sh.land === land) return;
+    const upm = sheetUnitsPerMm(sh);
+    const w = upm * (land ? A4_MM.long : A4_MM.short);
+    const h = w / sheetRatio(land);
+    sheetRef.current = { x: sh.x + sh.w / 2 - w / 2, y: sh.y + sh.h / 2 - h / 2, w, h, land };
+    cvRef.current?.requestRenderAll();
+  }, []);
+
+  /** Give all circled numbers the same size on the paper. */
+  const uniformNumbers = useCallback(() => {
+    const sh = sheetRef.current;
+    if (!sh) return;
+    const r = MARKER_MM[markerSizeRef.current] * sheetUnitsPerMm(sh);
+    const n = layerRef.current.setMarkersRadius(r);
+    cvRef.current?.requestRenderAll();
+    syncHist();
+    log(n ? `${n} numeri portati alla stessa misura` : "I numeri hanno già tutti questa misura");
+  }, [log, syncHist]);
 
   /** Write a new number into a circled number; `done` also drops the selection highlight. */
   const applyMarkerNumber = useCallback(
@@ -266,7 +343,7 @@ export default function CadEditor() {
       width: `Annullata modifica spessore (${r.n})`,
       trim: "Annullato taglio",
       move: "Annullato spostamento",
-      edit: "Annullata modifica del numero",
+      edit: "Annullata modifica dei numeri",
       add: "Annullato inserimento",
     };
     log(msg[r.kind]!);
@@ -286,7 +363,7 @@ export default function CadEditor() {
       width: `Rifatta modifica spessore (${r.n})`,
       trim: "Rifatto taglio",
       move: "Rifatto spostamento",
-      edit: "Rifatta modifica del numero",
+      edit: "Rifatta modifica dei numeri",
       add: "Rifatto inserimento",
     };
     log(msg[r.kind]!);
@@ -325,6 +402,7 @@ export default function CadEditor() {
       drawColor = "",
       panning = false,
       erasing = false,
+      sheetDrag: { mode: "move" | "resize"; ax: number; ay: number } | null = null,
       moving: { x: number; y: number; dx: number; dy: number; idx: number[] } | null = null,
       erasedIdx: number[] = [],
       marquee: {
@@ -337,6 +415,77 @@ export default function CadEditor() {
       } | null = null,
       last = { x: 0, y: 0 };
 
+    // A4 frame: dims what is outside, dashed outline, corner handles, "move" tab on the top edge
+    const sheetScreen = (sh: Sheet) => {
+      const v = cv.viewportTransform!;
+      const z = v[0]!;
+      return {
+        sx: sh.x * z + v[4]!,
+        sy: sh.y * z + v[5]!,
+        ex: (sh.x + sh.w) * z + v[4]!,
+        ey: (sh.y + sh.h) * z + v[5]!,
+      };
+    };
+    const drawSheet = (ctx: CanvasRenderingContext2D) => {
+      const sh = sheetRef.current;
+      if (!sh) return;
+      const { sx, sy, ex, ey } = sheetScreen(sh);
+      ctx.save();
+      ctx.fillStyle = "rgba(0,0,0,0.07)";
+      ctx.beginPath();
+      ctx.rect(0, 0, cv.getWidth(), cv.getHeight());
+      ctx.rect(sx, sy, ex - sx, ey - sy);
+      ctx.fill("evenodd");
+      ctx.strokeStyle = "#f59e0b";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([8, 5]);
+      ctx.strokeRect(sx, sy, ex - sx, ey - sy);
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#fff";
+      for (const [cx, cy] of [
+        [sx, sy],
+        [ex, sy],
+        [ex, ey],
+        [sx, ey],
+      ] as const) {
+        ctx.fillRect(cx - 5, cy - 5, 10, 10);
+        ctx.strokeRect(cx - 5, cy - 5, 10, 10);
+      }
+      ctx.fillStyle = "#f59e0b";
+      ctx.fillRect(sx, sy - 22, 92, 20);
+      ctx.fillStyle = "#111";
+      ctx.font = "bold 11px ui-monospace, monospace";
+      ctx.textBaseline = "middle";
+      ctx.fillText("A4 · sposta", sx + 8, sy - 12);
+      ctx.restore();
+    };
+    /** What is under a screen point of the A4 frame: a corner (resize) or the tab / edge (move). */
+    const sheetHit = (vx: number, vy: number) => {
+      const sh = sheetRef.current;
+      if (!sh) return null;
+      const { sx, sy, ex, ey } = sheetScreen(sh);
+      const corners = [
+        [sx, sy],
+        [ex, sy],
+        [ex, ey],
+        [sx, ey],
+      ] as const;
+      for (let k = 0; k < 4; k++) {
+        const [cx, cy] = corners[k]!;
+        if (Math.abs(vx - cx) <= 9 && Math.abs(vy - cy) <= 9) {
+          const [ox, oy] = corners[(k + 2) % 4]!;
+          const v = cv.viewportTransform!;
+          return { mode: "resize" as const, ax: (ox - v[4]!) / v[0]!, ay: (oy - v[5]!) / v[0]! };
+        }
+      }
+      const inTab = vx >= sx && vx <= sx + 92 && vy >= sy - 22 && vy <= sy;
+      const onEdge =
+        (Math.abs(vx - sx) <= 5 || Math.abs(vx - ex) <= 5) && vy >= sy && vy <= ey
+          ? true
+          : (Math.abs(vy - sy) <= 5 || Math.abs(vy - ey) <= 5) && vx >= sx && vx <= ex;
+      return inTab || onEdge ? { mode: "move" as const, ax: 0, ay: 0 } : null;
+    };
+
     // The drawing is painted by the DrawingLayer under Fabric's own objects (the preview),
     // selection highlight and rubber-band box on top.
     cv.on("before:render", ({ ctx }) =>
@@ -344,6 +493,7 @@ export default function CadEditor() {
     );
     cv.on("after:render", ({ ctx }) => {
       layerRef.current.drawSelection(ctx, cv.viewportTransform);
+      drawSheet(ctx);
       if (marquee) {
         const x = Math.min(marquee.x0, marquee.x1),
           y = Math.min(marquee.y0, marquee.y1);
@@ -386,6 +536,20 @@ export default function CadEditor() {
     cv.on("mouse:down", (opt) => {
       const t = toolRef.current;
       const ev = opt.e as MouseEvent;
+      if (sheetRef.current && ev.button === 0 && t !== "pan") {
+        const v = cv.getViewportPoint(ev);
+        const hit = sheetHit(v.x, v.y);
+        if (hit) {
+          sheetDrag = hit;
+          const p = cv.getScenePoint(ev);
+          if (hit.mode === "move") {
+            // remember where inside the frame it was grabbed
+            sheetDrag.ax = p.x - sheetRef.current.x;
+            sheetDrag.ay = p.y - sheetRef.current.y;
+          }
+          return;
+        }
+      }
       if (t === "erase" && ev.button !== 1) {
         erasing = true;
         erasedIdx = [];
@@ -444,7 +608,9 @@ export default function CadEditor() {
           type: "marker",
           x: p.x,
           y: p.y,
-          r: MARKER_RADIUS_PX[markerSizeRef.current] / cv.getZoom(),
+          r: sheetRef.current
+            ? MARKER_MM[markerSizeRef.current] * sheetUnitsPerMm(sheetRef.current)
+            : MARKER_RADIUS_PX[markerSizeRef.current] / cv.getZoom(),
           n,
           color: colorRef.current,
           w: thickRef.current,
@@ -480,6 +646,29 @@ export default function CadEditor() {
     });
     cv.on("mouse:move", (opt) => {
       const ev = opt.e as MouseEvent;
+      if (sheetDrag && sheetRef.current) {
+        const p = cv.getScenePoint(ev);
+        const sh = sheetRef.current;
+        if (sheetDrag.mode === "move") {
+          sh.x = p.x - sheetDrag.ax;
+          sh.y = p.y - sheetDrag.ay;
+        } else {
+          // corner opposite to the one being dragged stays put; proportions stay A4
+          const ratio = sheetRatio(sh.land);
+          const w = Math.max(
+            Math.abs(p.x - sheetDrag.ax),
+            Math.abs(p.y - sheetDrag.ay) * ratio,
+            1e-6,
+          );
+          const h = w / ratio;
+          sh.w = w;
+          sh.h = h;
+          sh.x = p.x < sheetDrag.ax ? sheetDrag.ax - w : sheetDrag.ax;
+          sh.y = p.y < sheetDrag.ay ? sheetDrag.ay - h : sheetDrag.ay;
+        }
+        cv.requestRenderAll();
+        return;
+      }
       if (panning) {
         const vpt = cv.viewportTransform!;
         vpt[4] += ev.clientX - last.x;
@@ -525,6 +714,10 @@ export default function CadEditor() {
       cv.requestRenderAll();
     });
     cv.on("mouse:up", () => {
+      if (sheetDrag) {
+        sheetDrag = null;
+        return;
+      }
       if (panning) {
         panning = false;
         cv.setCursor(toolRef.current === "pan" ? "grab" : "default");
@@ -784,6 +977,25 @@ export default function CadEditor() {
     });
   };
 
+  const exportSheet = async () => {
+    const sh = sheetRef.current;
+    if (!sh) return;
+    setLoading("Creazione immagine A4…");
+    await new Promise((r) => setTimeout(r, 30));
+    const blob = await layerRef.current.toSheetPngBlob(sh);
+    setLoading(null);
+    if (!blob) {
+      log("Impossibile creare l'immagine");
+      return;
+    }
+    await saveOutput(blob, {
+      name: baseName() + "_A4.png",
+      ext: ".png",
+      mime: "image/png",
+      label: "Immagine PNG A4 (sfondo trasparente, solo il contenuto del foglio)",
+    });
+  };
+
   /** "Carica DXF": system picker when available (keeps the folder), plain input otherwise. */
   const openFile = async () => {
     const r = await pickFileToOpen();
@@ -801,6 +1013,7 @@ export default function CadEditor() {
     } else if (["canc", "cancella", "del", "delete", "elimina"].includes(c)) deleteSelected();
     else if (["copia", "copy", "co"].includes(c)) copySelected();
     else if (["incolla", "paste", "in"].includes(c)) pasteClipboard();
+    else if (["a4", "foglio"].includes(c)) toggleSheet();
     else if (["sposta", "move", "m"].includes(c)) {
       applyTool("move");
       log("SPOSTA attivo: trascina un elemento (o la selezione) dove vuoi");
@@ -920,6 +1133,15 @@ export default function CadEditor() {
               e.target.value = "";
             }}
           />
+          {sheetOn && (
+            <button
+              onClick={exportSheet}
+              title="Salva come PNG solo quello che sta dentro il foglio A4 (300 dpi, sfondo trasparente)"
+              className="inline-flex items-center gap-2 rounded-md border border-amber-500 px-3 py-2 text-sm hover:bg-accent"
+            >
+              <Frame className="h-4 w-4" /> Esporta A4
+            </button>
+          )}
           <button
             onClick={exportPng}
             title="Salva come immagine PNG con sfondo trasparente"
@@ -1054,7 +1276,7 @@ export default function CadEditor() {
           )}
 
           {/* THICKNESS (and number options) */}
-          <div className="absolute left-1/2 top-3 z-10 flex -translate-x-1/2 items-center gap-3 rounded-lg border border-border bg-card/95 px-3 py-1.5 text-xs shadow-lg">
+          <div className="absolute left-1/2 top-3 z-10 flex w-max max-w-[calc(100%-6rem)] -translate-x-1/2 flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-lg border border-border bg-card/95 px-3 py-1.5 text-xs shadow-lg">
             <div className="flex items-center gap-1" role="group" aria-label="Spessore linea">
               <span className="mr-1 text-muted-foreground">Spessore</span>
               {THICKNESS.map((px) => (
@@ -1073,6 +1295,80 @@ export default function CadEditor() {
                   />
                 </button>
               ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-2 border-l border-border pl-3">
+              <button
+                aria-label="Foglio A4"
+                aria-pressed={sheetOn}
+                onClick={toggleSheet}
+                title="Mostra il foglio A4 per sistemare il disegno ed esportare solo quello che c'è dentro"
+                className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 ${sheetOn ? "border-amber-500 bg-amber-500/20" : "border-border hover:bg-accent"}`}
+              >
+                <Frame className="h-4 w-4" /> Foglio A4
+              </button>
+              {sheetOn && (
+                <>
+                  <div
+                    className="flex items-center gap-1"
+                    role="group"
+                    aria-label="Orientamento foglio"
+                  >
+                    {[
+                      { land: false, label: "Verticale" },
+                      { land: true, label: "Orizzontale" },
+                    ].map((o) => (
+                      <button
+                        key={o.label}
+                        aria-label={o.label}
+                        aria-pressed={sheetLand === o.land}
+                        onClick={() => chooseOrientation(o.land)}
+                        className={`rounded-md px-2 py-1 ${sheetLand === o.land ? "bg-primary text-primary-foreground" : "hover:bg-accent"}`}
+                      >
+                        {o.label}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    aria-label="Adatta al disegno"
+                    onClick={() => {
+                      placeSheet(sheetLand);
+                    }}
+                    title="Rimette il foglio intorno a tutto il disegno"
+                    className="rounded-md border border-border px-2 py-1 hover:bg-accent"
+                  >
+                    Adatta
+                  </button>
+                  <div
+                    className="flex items-center gap-1"
+                    role="group"
+                    aria-label="Misura numeri sul foglio"
+                  >
+                    {(Object.keys(MARKER_MM) as MarkerSize[]).map((sz) => (
+                      <button
+                        key={sz}
+                        aria-label={`Numeri ${sz}`}
+                        aria-pressed={markerSize === sz}
+                        title={`Cerchio di ${MARKER_MM[sz] * 2} mm sul foglio`}
+                        onClick={() => {
+                          markerSizeRef.current = sz;
+                          setMarkerSizeState(sz);
+                        }}
+                        className={`rounded-md px-2 py-1 ${markerSize === sz ? "bg-primary text-primary-foreground" : "hover:bg-accent"}`}
+                      >
+                        {sz} {MARKER_MM[sz] * 2}mm
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    aria-label="Uniforma numeri"
+                    onClick={uniformNumbers}
+                    title="Porta tutti i numeri alla misura scelta, uguale sul foglio"
+                    className="rounded-md border border-border px-2 py-1 hover:bg-accent"
+                  >
+                    Uniforma numeri
+                  </button>
+                </>
+              )}
             </div>
             {editMarker && (tool === "select" || tool === "move") && (
               <label className="flex items-center gap-1.5 border-l border-border pl-3 text-muted-foreground">

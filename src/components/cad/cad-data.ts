@@ -56,6 +56,35 @@ export function withWidth(e: Ent, w: number): Ent {
   return e.type === "rect" ? { ...e, sw: w } : { ...e, w };
 }
 
+/** A4 sheet: the export frame keeps these proportions; sizes are real millimetres on paper. */
+export const A4_MM = { short: 210, long: 297 };
+export type Sheet = { x: number; y: number; w: number; h: number; land: boolean };
+/** Pen width on paper: one thickness step (screen px) is 0.1 mm. */
+export const PEN_MM_PER_PX = 0.1;
+export const EXPORT_DPI = 300;
+/** Radius in mm on paper of the circled numbers S / M / L (circle 5 / 7 / 9 mm). */
+export const MARKER_MM = { S: 2.5, M: 3.5, L: 4.5 } as const;
+
+export const sheetRatio = (land: boolean) =>
+  land ? A4_MM.long / A4_MM.short : A4_MM.short / A4_MM.long;
+
+/** A4 frame (same orientation rules as the user picks) centred on `b`, with a small margin. */
+export function fitSheet(
+  b: { x1: number; y1: number; x2: number; y2: number },
+  land: boolean,
+  margin = 0.06,
+): Sheet {
+  const r = sheetRatio(land);
+  const bw = Math.max(b.x2 - b.x1, 1e-6),
+    bh = Math.max(b.y2 - b.y1, 1e-6);
+  const w = Math.max(bw, bh * r) * (1 + margin * 2);
+  const h = w / r;
+  return { x: (b.x1 + b.x2) / 2 - w / 2, y: (b.y1 + b.y2) / 2 - h / 2, w, h, land };
+}
+
+/** Scene units per millimetre of paper for a frame. */
+export const sheetUnitsPerMm = (s: Sheet) => s.w / (s.land ? A4_MM.long : A4_MM.short);
+
 /** Font size of the number inside a circled-number marker (shrinks for long numbers). */
 export function markerFontSize(r: number, n: string): number {
   return Math.min(r, (1.7 * r) / (0.6 * Math.max(2, n.length)));
