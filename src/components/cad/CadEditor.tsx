@@ -9,6 +9,8 @@ import {
   Eraser,
   Scissors,
   Frame,
+  Eye,
+  EyeOff,
   Move,
   Copy,
   ClipboardPaste,
@@ -127,6 +129,12 @@ export default function CadEditor() {
   const sheetRef = useRef<Sheet | null>(null);
   const [sheetOn, setSheetOn] = useState(false);
   const [sheetLand, setSheetLand] = useState(false);
+  // export only the entities the frame was fitted to (set by "Foglio sulla selezione")
+  const onlyRef = useRef<number[] | null>(null);
+  const [onlyCount, setOnlyCount] = useState(0);
+  const [onlyChecked, setOnlyChecked] = useState(true);
+  // the "Numeri" layer: off hides the circled numbers (screen, PNG exports, DXF layer)
+  const [numbersHidden, setNumbersHidden] = useState(false);
   const [hist, setHist] = useState({ undo: false, redo: false });
   // where the open drawing came from (lets the save window start in the same folder)
   const fileHandleRef = useRef<FileSystemFileHandle | null>(null);
@@ -157,14 +165,16 @@ export default function CadEditor() {
 
   /** Put the A4 frame around the whole drawing. */
   const placeSheet = useCallback(
-    (land: boolean) => {
-      const b = layerRef.current.bounds();
+    (land: boolean, around?: ReturnType<DrawingLayer["bounds"]>, only?: number[]) => {
+      const b = around ?? layerRef.current.bounds();
       if (!b) {
         log("Disegno vuoto: niente da inquadrare");
         return false;
       }
-      const sh = fitSheet(b, land);
+      const sh = fitSheet(b, land, around ? 0.1 : 0.06);
       sheetRef.current = sh;
+      onlyRef.current = only ?? null;
+      setOnlyCount(only?.length ?? 0);
       // zoom so the whole sheet is visible
       const cv = cvRef.current;
       if (cv) {
@@ -189,6 +199,8 @@ export default function CadEditor() {
   const toggleSheet = useCallback(() => {
     if (sheetRef.current) {
       sheetRef.current = null;
+      onlyRef.current = null;
+      setOnlyCount(0);
       setSheetOn(false);
       cvRef.current?.requestRenderAll();
       log("Foglio A4 nascosto");
@@ -197,6 +209,35 @@ export default function CadEditor() {
       log("Foglio A4: trascinalo dal bordo o dall'etichetta, allargalo dagli angoli");
     }
   }, [log, placeSheet, sheetLand]);
+
+  /** Fit the A4 frame around what is selected, centred; the export then holds just that. */
+  const sheetOnSelection = useCallback(() => {
+    const L = layerRef.current;
+    const b = L.selectionBounds();
+    if (!b) {
+      log("Prima seleziona la parte da esportare");
+      return;
+    }
+    const idx = [...L.selected];
+    if (placeSheet(sheetLand, b, idx)) {
+      setSheetOn(true);
+      setOnlyChecked(true);
+      log(`Foglio A4 sulla selezione (${idx.length} element${idx.length === 1 ? "o" : "i"})`);
+    }
+  }, [log, placeSheet, sheetLand]);
+
+  const setNumbersVisible = useCallback(
+    (visible: boolean) => {
+      layerRef.current.setMarkersVisible(visible);
+      setNumbersHidden(!visible);
+      syncMarker();
+      cvRef.current?.requestRenderAll();
+      log(
+        visible ? "Livello Numeri acceso" : "Livello Numeri spento: non si vede e non si esporta",
+      );
+    },
+    [log, syncMarker],
+  );
 
   /** Turn the frame around keeping its centre and its scale (paper mm per drawing unit). */
   const chooseOrientation = useCallback((land: boolean) => {
@@ -281,6 +322,13 @@ export default function CadEditor() {
       const cv = cvRef.current;
       if (!cv) return;
       layerRef.current = new DrawingLayer(typeof src === "number" ? buildMockDrawing(src) : src);
+      // a new drawing starts with every layer on and no export frame
+      setNumbersHidden(false);
+      sheetRef.current = null;
+      onlyRef.current = null;
+      setOnlyCount(0);
+      setSheetOn(false);
+      setEditMarker(null);
       zoomExtents();
       syncHist();
       cv.requestRenderAll();
@@ -603,6 +651,7 @@ export default function CadEditor() {
       }
       if (t === "marker") {
         const p = cv.getScenePoint(ev);
+        if (layerRef.current.hideMarkers) setNumbersVisible(true); // a new number needs its layer on
         const n = String(markerNextRef.current).padStart(2, "0");
         layerRef.current.addUndoable({
           type: "marker",
@@ -949,7 +998,10 @@ export default function CadEditor() {
     if (!cvRef.current) return;
     setLoading("Generazione DXF sul server…");
     await new Promise((r) => setTimeout(r, 400)); // simulated server step; lets the loader paint
-    const blob = new Blob([toDxf(layerRef.current.toEnts())], { type: "application/dxf" });
+    const blob = new Blob(
+      [toDxf(layerRef.current.toEnts(), { numbersOff: layerRef.current.hideMarkers })],
+      { type: "application/dxf" },
+    );
     setLoading(null);
     await saveOutput(blob, {
       name: baseName() + "_modificato.dxf",
@@ -982,7 +1034,8 @@ export default function CadEditor() {
     if (!sh) return;
     setLoading("Creazione immagine A4…");
     await new Promise((r) => setTimeout(r, 30));
-    const blob = await layerRef.current.toSheetPngBlob(sh);
+    const only = onlyChecked && onlyRef.current ? onlyRef.current : undefined;
+    const blob = await layerRef.current.toSheetPngBlob(sh, only);
     setLoading(null);
     if (!blob) {
       log("Impossibile creare l'immagine");
@@ -1306,6 +1359,25 @@ export default function CadEditor() {
               >
                 <Frame className="h-4 w-4" /> Foglio A4
               </button>
+              <button
+                aria-label="Foglio sulla selezione"
+                onClick={sheetOnSelection}
+                title="Seleziona una parte del disegno, poi premi qui: il foglio A4 si mette intorno, al centro"
+                className="rounded-md border border-border px-2 py-1 hover:bg-accent"
+              >
+                Foglio sulla selezione
+              </button>
+              {sheetOn && onlyCount > 0 && (
+                <label className="flex items-center gap-1.5 text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    aria-label="Solo gli elementi scelti"
+                    checked={onlyChecked}
+                    onChange={(e) => setOnlyChecked(e.target.checked)}
+                  />
+                  Solo i {onlyCount} scelti
+                </label>
+              )}
               {sheetOn && (
                 <>
                   <div
@@ -1369,6 +1441,27 @@ export default function CadEditor() {
                   </button>
                 </>
               )}
+            </div>
+            <div
+              className="flex items-center gap-1 border-l border-border pl-3"
+              role="group"
+              aria-label="Livelli"
+            >
+              <span className="mr-1 text-muted-foreground">Livelli</span>
+              <button
+                aria-label="Livello Numeri"
+                aria-pressed={!numbersHidden}
+                onClick={() => setNumbersVisible(numbersHidden)}
+                title={
+                  numbersHidden
+                    ? "Numeri spenti: clicca per accenderli"
+                    : "Numeri accesi: clicca per spegnerli (non si vedono e non si esportano)"
+                }
+                className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 ${numbersHidden ? "border-border text-muted-foreground line-through hover:bg-accent" : "border-primary bg-primary/15"}`}
+              >
+                {numbersHidden ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}{" "}
+                Numeri
+              </button>
             </div>
             {editMarker && (tool === "select" || tool === "move") && (
               <label className="flex items-center gap-1.5 border-l border-border pl-3 text-muted-foreground">

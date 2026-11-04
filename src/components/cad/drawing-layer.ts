@@ -250,6 +250,8 @@ export class DrawingLayer {
   /** Entities by index; a removed entity leaves `null` so indexes stay stable. */
   items: (Ent | null)[] = [];
   selected = new Set<number>();
+  /** The "Numeri" layer switched off: circled numbers are not drawn, picked or exported. */
+  hideMarkers = false;
   count = 0;
   private bb: number[] = []; // x1,y1,x2,y2 per item
   private strokes: Map<string, Bucket> | null = null;
@@ -270,6 +272,36 @@ export class DrawingLayer {
   }
   get canRedo() {
     return this.redoStack.length > 0;
+  }
+
+  private shown(e: Ent) {
+    return !(this.hideMarkers && e.type === "marker");
+  }
+
+  /** Switch the circled-numbers layer on or off (not an undo step; the view state). */
+  setMarkersVisible(visible: boolean) {
+    this.hideMarkers = !visible;
+    if (!visible)
+      for (const i of [...this.selected])
+        if (this.items[i]?.type === "marker") this.selected.delete(i);
+    this.strokes = null;
+  }
+
+  /** Bounds of the selected entities, or null when nothing is selected. */
+  selectionBounds(): Bounds | null {
+    let x1 = Infinity,
+      y1 = Infinity,
+      x2 = -Infinity,
+      y2 = -Infinity;
+    for (const i of this.selected) {
+      if (!this.items[i]) continue;
+      const k = i * 4;
+      x1 = Math.min(x1, this.bb[k]!);
+      y1 = Math.min(y1, this.bb[k + 1]!);
+      x2 = Math.max(x2, this.bb[k + 2]!);
+      y2 = Math.max(y2, this.bb[k + 3]!);
+    }
+    return x1 === Infinity ? null : { x1, y1, x2, y2 };
   }
 
   /** Low-level add (no history); used while loading. */
@@ -550,7 +582,8 @@ export class DrawingLayer {
       x2 = -Infinity,
       y2 = -Infinity;
     for (let i = 0; i < this.items.length; i++) {
-      if (!this.items[i]) continue;
+      const e = this.items[i];
+      if (!e || !this.shown(e)) continue;
       const k = i * 4;
       if (this.bb[k]! < x1) x1 = this.bb[k]!;
       if (this.bb[k + 1]! < y1) y1 = this.bb[k + 1]!;
@@ -564,7 +597,7 @@ export class DrawingLayer {
   hitAt(x: number, y: number, tol: number): number {
     for (let i = this.items.length - 1; i >= 0; i--) {
       const e = this.items[i];
-      if (!e) continue;
+      if (!e || !this.shown(e)) continue;
       const k = i * 4;
       if (
         x < this.bb[k]! - tol ||
@@ -586,7 +619,8 @@ export class DrawingLayer {
       y2 = Math.max(a.y, b.y);
     const out: number[] = [];
     for (let i = 0; i < this.items.length; i++) {
-      if (!this.items[i]) continue;
+      const e = this.items[i];
+      if (!e || !this.shown(e)) continue;
       const k = i * 4;
       if (
         this.bb[k]! >= x1 &&
@@ -608,7 +642,7 @@ export class DrawingLayer {
     const out: number[] = [];
     for (let i = 0; i < this.items.length; i++) {
       const e = this.items[i];
-      if (!e) continue;
+      if (!e || !this.shown(e)) continue;
       const k = i * 4;
       // cheap bounding-box test first, exact geometry only for what survives
       if (this.bb[k + 2]! < x1 || this.bb[k]! > x2 || this.bb[k + 3]! < y1 || this.bb[k + 1]! > y2)
@@ -625,7 +659,7 @@ export class DrawingLayer {
     this.labels = [];
     for (let i = 0; i < this.items.length; i++) {
       const e = this.items[i];
-      if (!e) continue;
+      if (!e || !this.shown(e)) continue;
       if (e.type === "text") {
         this.texts.push(i);
         continue;
@@ -763,7 +797,15 @@ export class DrawingLayer {
    * Render only what lies inside the A4 frame, at 300 dpi, transparent, without the frame itself.
    * Pen widths follow the paper (0.1 mm per thickness step) so lines survive being scaled down.
    */
-  toSheetPngBlob(sheet: Sheet): Promise<Blob | null> {
+  toSheetPngBlob(sheet: Sheet, only?: Iterable<number>): Promise<Blob | null> {
+    if (only) {
+      // export just these entities: draw them from a layer of their own
+      const sub = new DrawingLayer(
+        [...only].map((i) => this.items[i]).filter((e): e is Ent => !!e),
+      );
+      sub.hideMarkers = this.hideMarkers;
+      return sub.toSheetPngBlob(sheet);
+    }
     const mmW = sheet.land ? A4_MM.long : A4_MM.short,
       mmH = sheet.land ? A4_MM.short : A4_MM.long;
     const W = Math.round((mmW / 25.4) * EXPORT_DPI),
@@ -806,7 +848,7 @@ export class DrawingLayer {
     ctx.lineJoin = "round";
     for (const i of this.selected) {
       const e = this.items[i];
-      if (!e) continue;
+      if (!e || !this.shown(e)) continue;
       ctx.beginPath();
       if (e.type === "text") {
         const { w, h } = textBox(e);

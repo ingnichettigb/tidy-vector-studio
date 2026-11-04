@@ -204,7 +204,10 @@ function aci(color: string) {
 }
 const n = (v: number) => v.toFixed(3);
 
-export function toDxf(ents: Ent[]): string {
+/** Layer holding the circled numbers in the DXF (can be switched off in any CAD program). */
+export const NUMBERS_LAYER = "NUMERI";
+
+export function toDxf(ents: Ent[], opts: { numbersOff?: boolean } = {}): string {
   const out: string[] = [];
   const g = (code: number, value: string | number) => out.push(String(code), String(value));
   // R2000 (AC1015) is the oldest DXF version that can store line thickness (group 370)
@@ -215,12 +218,45 @@ export function toDxf(ents: Ent[]): string {
   g(9, "$LWDISPLAY");
   g(290, 1);
   g(0, "ENDSEC");
+  // layers: "0" for the drawing, NUMERI for the circled numbers (negative colour = layer off)
+  g(0, "SECTION");
+  g(2, "TABLES");
+  g(0, "TABLE");
+  g(2, "LTYPE");
+  g(70, 1);
+  g(0, "LTYPE");
+  g(100, "AcDbSymbolTableRecord");
+  g(100, "AcDbLinetypeTableRecord");
+  g(2, "CONTINUOUS");
+  g(70, 0);
+  g(3, "Solid line");
+  g(72, 65);
+  g(73, 0);
+  g(40, "0.0");
+  g(0, "ENDTAB");
+  g(0, "TABLE");
+  g(2, "LAYER");
+  g(70, 2);
+  for (const [name, color] of [
+    ["0", 7],
+    [NUMBERS_LAYER, opts.numbersOff ? -7 : 7],
+  ] as const) {
+    g(0, "LAYER");
+    g(100, "AcDbSymbolTableRecord");
+    g(100, "AcDbLayerTableRecord");
+    g(2, name);
+    g(70, 0);
+    g(62, color);
+    g(6, "CONTINUOUS");
+  }
+  g(0, "ENDTAB");
+  g(0, "ENDSEC");
   g(0, "SECTION");
   g(2, "ENTITIES");
-  const entity = (type: string, sub: string, c: number, w?: number) => {
+  const entity = (type: string, sub: string, c: number, w?: number, layer = "0") => {
     g(0, type);
     g(100, "AcDbEntity");
-    g(8, "0");
+    g(8, layer);
     g(62, c);
     if (w) g(370, widthToLineweight(w));
     g(100, sub);
@@ -252,11 +288,11 @@ export function toDxf(ents: Ent[]): string {
       line(e.x, b, e.x, e.y, c, e.sw);
     } else if (e.type === "marker") {
       const c = aci(e.color);
-      entity("CIRCLE", "AcDbCircle", c, e.w);
+      entity("CIRCLE", "AcDbCircle", c, e.w, NUMBERS_LAYER);
       point(0, e.x, e.y);
       g(40, n(e.r));
       // the number, centred in the circle (horizontal 72 = centre, vertical 73 = middle)
-      entity("TEXT", "AcDbText", c);
+      entity("TEXT", "AcDbText", c, undefined, NUMBERS_LAYER);
       point(0, e.x, e.y);
       g(40, n(markerFontSize(e.r, e.n) * 0.8));
       g(1, e.n);

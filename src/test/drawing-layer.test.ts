@@ -426,3 +426,56 @@ describe("A4 sheet", () => {
     expect(d.items[1]).toMatchObject({ r: 5 });
   });
 });
+
+describe("Numeri layer and selection frame", () => {
+  const mk = (x: number): Ent => ({ type: "marker", x, y: 0, r: 5, n: "00", color: "#111" });
+  const ln: Ent = { type: "line", x1: 0, y1: 0, x2: 100, y2: 0, color: "#111", w: 3 };
+
+  it("hides the numbers from picking, selection boxes and bounds, and brings them back", () => {
+    const d = new DrawingLayer([ln, mk(500)]);
+    expect(d.bounds()!.x2).toBeGreaterThan(400);
+    d.selected = new Set([0, 1]);
+    d.setMarkersVisible(false);
+    expect(d.selected.has(1)).toBe(false); // a hidden number cannot stay selected
+    expect(d.selected.has(0)).toBe(true);
+    expect(d.hitAt(500, 0, 2)).toBe(-1);
+    expect(d.insideRect({ x: 400, y: -50 }, { x: 600, y: 50 })).toEqual([]);
+    expect(d.touchRect({ x: 400, y: -50 }, { x: 600, y: 50 })).toEqual([]);
+    expect(d.bounds()!.x2).toBe(100);
+    expect(d.toEnts()).toHaveLength(2); // still in the drawing (and in the DXF, on its own layer)
+    d.setMarkersVisible(true);
+    expect(d.hitAt(500, 0, 2)).toBe(1);
+    expect(d.bounds()!.x2).toBeGreaterThan(400);
+  });
+
+  it("bounds of the selection only", () => {
+    const d = new DrawingLayer([ln, mk(500), { ...ln, x1: 1000, x2: 1100 }]);
+    expect(d.selectionBounds()).toBeNull();
+    d.selected = new Set([0, 1]);
+    const b = d.selectionBounds()!;
+    expect(b.x1).toBe(0);
+    expect(b.x2).toBe(505);
+  });
+
+  it("writes the numbers on their own DXF layer, switched off when asked", () => {
+    const ents: Ent[] = [ln, mk(10)];
+    const rows = (t: string) => t.split("\n");
+    const layers = (t: string) => {
+      const L = rows(t);
+      const out: string[] = [];
+      for (let i = 0; i < L.length - 1; i += 2) if (L[i] === "8") out.push(L[i + 1]!);
+      return out;
+    };
+    const on = toDxf(ents);
+    expect(layers(on)).toEqual(["0", "NUMERI", "NUMERI"]); // line, circle, text
+    expect(on).toContain("NUMERI");
+    const off = toDxf(ents, { numbersOff: true });
+    const L = rows(off);
+    const k = L.indexOf("NUMERI"); // the layer table entry
+    expect(L.slice(k, k + 6)).toEqual(["NUMERI", "70", "0", "62", "-7", "6"]);
+    expect(rows(on).slice(rows(on).indexOf("NUMERI") + 3, rows(on).indexOf("NUMERI") + 5)).toEqual([
+      "62",
+      "7",
+    ]);
+  });
+});
