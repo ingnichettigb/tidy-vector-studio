@@ -10,6 +10,8 @@ import {
   Scissors,
   Frame,
   Eye,
+  Lock,
+  LockOpen,
   EyeOff,
   Move,
   Copy,
@@ -129,6 +131,9 @@ export default function CadEditor() {
   const sheetRef = useRef<Sheet | null>(null);
   const [sheetOn, setSheetOn] = useState(false);
   const [sheetLand, setSheetLand] = useState(false);
+  // a fixed frame cannot be dragged by accident: zoom and pan stay free while numbers are placed
+  const sheetLockedRef = useRef(false);
+  const [sheetLocked, setSheetLocked] = useState(false);
   // export only the entities the frame was fitted to (set by "Foglio sulla selezione")
   const onlyRef = useRef<number[] | null>(null);
   const [onlyCount, setOnlyCount] = useState(0);
@@ -163,6 +168,20 @@ export default function CadEditor() {
     setEditMarker(e && e.type === "marker" ? { i: only, n: e.n } : null);
   }, []);
 
+  /**
+   * While the A4 frame is on, every circled number takes the size it will have on the paper
+   * (S / M / L in mm). Where it was clicked is kept; only the size follows the frame.
+   */
+  const syncMarkerSize = useCallback(() => {
+    const sh = sheetRef.current;
+    if (!sh) return;
+    layerRef.current.setMarkersRadius(
+      MARKER_MM[markerSizeRef.current] * sheetUnitsPerMm(sh),
+      false,
+    );
+    cvRef.current?.requestRenderAll();
+  }, []);
+
   /** Put the A4 frame around the whole drawing. */
   const placeSheet = useCallback(
     (land: boolean, around?: ReturnType<DrawingLayer["bounds"]>, only?: number[]) => {
@@ -175,6 +194,7 @@ export default function CadEditor() {
       sheetRef.current = sh;
       onlyRef.current = only ?? null;
       setOnlyCount(only?.length ?? 0);
+      syncMarkerSize();
       // zoom so the whole sheet is visible
       const cv = cvRef.current;
       if (cv) {
@@ -193,13 +213,15 @@ export default function CadEditor() {
       }
       return true;
     },
-    [log],
+    [log, syncMarkerSize],
   );
 
   const toggleSheet = useCallback(() => {
     if (sheetRef.current) {
       sheetRef.current = null;
       onlyRef.current = null;
+      sheetLockedRef.current = false;
+      setSheetLocked(false);
       setOnlyCount(0);
       setSheetOn(false);
       cvRef.current?.requestRenderAll();
@@ -240,27 +262,32 @@ export default function CadEditor() {
   );
 
   /** Turn the frame around keeping its centre and its scale (paper mm per drawing unit). */
-  const chooseOrientation = useCallback((land: boolean) => {
-    setSheetLand(land);
-    const sh = sheetRef.current;
-    if (!sh || sh.land === land) return;
-    const upm = sheetUnitsPerMm(sh);
-    const w = upm * (land ? A4_MM.long : A4_MM.short);
-    const h = w / sheetRatio(land);
-    sheetRef.current = { x: sh.x + sh.w / 2 - w / 2, y: sh.y + sh.h / 2 - h / 2, w, h, land };
-    cvRef.current?.requestRenderAll();
-  }, []);
+  const chooseOrientation = useCallback(
+    (land: boolean) => {
+      setSheetLand(land);
+      const sh = sheetRef.current;
+      if (!sh || sh.land === land) return;
+      const upm = sheetUnitsPerMm(sh);
+      const w = upm * (land ? A4_MM.long : A4_MM.short);
+      const h = w / sheetRatio(land);
+      sheetRef.current = { x: sh.x + sh.w / 2 - w / 2, y: sh.y + sh.h / 2 - h / 2, w, h, land };
+      syncMarkerSize();
+      cvRef.current?.requestRenderAll();
+    },
+    [syncMarkerSize],
+  );
 
-  /** Give all circled numbers the same size on the paper. */
-  const uniformNumbers = useCallback(() => {
-    const sh = sheetRef.current;
-    if (!sh) return;
-    const r = MARKER_MM[markerSizeRef.current] * sheetUnitsPerMm(sh);
-    const n = layerRef.current.setMarkersRadius(r);
+  const toggleLock = useCallback(() => {
+    const v = !sheetLockedRef.current;
+    sheetLockedRef.current = v;
+    setSheetLocked(v);
     cvRef.current?.requestRenderAll();
-    syncHist();
-    log(n ? `${n} numeri portati alla stessa misura` : "I numeri hanno già tutti questa misura");
-  }, [log, syncHist]);
+    log(
+      v
+        ? "Foglio fissato: puoi ingrandire e inserire i numeri, il foglio non si sposta"
+        : "Foglio sbloccato: puoi spostarlo e ridimensionarlo",
+    );
+  }, [log]);
 
   /** Write a new number into a circled number; `done` also drops the selection highlight. */
   const applyMarkerNumber = useCallback(
@@ -324,6 +351,8 @@ export default function CadEditor() {
       layerRef.current = new DrawingLayer(typeof src === "number" ? buildMockDrawing(src) : src);
       // a new drawing starts with every layer on and no export frame
       setNumbersHidden(false);
+      sheetLockedRef.current = false;
+      setSheetLocked(false);
       sheetRef.current = null;
       onlyRef.current = null;
       setOnlyCount(0);
@@ -383,6 +412,7 @@ export default function CadEditor() {
       log("Niente da annullare");
       return;
     }
+    syncMarkerSize();
     cvRef.current?.requestRenderAll();
     syncHist();
     syncMarker();
@@ -395,7 +425,7 @@ export default function CadEditor() {
       add: "Annullato inserimento",
     };
     log(msg[r.kind]!);
-  }, [log, syncHist, syncMarker]);
+  }, [log, syncHist, syncMarker, syncMarkerSize]);
 
   const redo = useCallback(() => {
     const r = layerRef.current.redo();
@@ -403,6 +433,7 @@ export default function CadEditor() {
       log("Niente da ripristinare");
       return;
     }
+    syncMarkerSize();
     cvRef.current?.requestRenderAll();
     syncHist();
     syncMarker();
@@ -415,7 +446,7 @@ export default function CadEditor() {
       add: "Rifatto inserimento",
     };
     log(msg[r.kind]!);
-  }, [log, syncHist, syncMarker]);
+  }, [log, syncHist, syncMarker, syncMarkerSize]);
 
   const chooseThickness = useCallback(
     (px: number) => {
@@ -489,6 +520,10 @@ export default function CadEditor() {
       ctx.setLineDash([8, 5]);
       ctx.strokeRect(sx, sy, ex - sx, ey - sy);
       ctx.setLineDash([]);
+      if (sheetLockedRef.current) {
+        ctx.restore();
+        return; // fixed: just the outline, no handles
+      }
       ctx.fillStyle = "#fff";
       for (const [cx, cy] of [
         [sx, sy],
@@ -510,7 +545,7 @@ export default function CadEditor() {
     /** What is under a screen point of the A4 frame: a corner (resize) or the tab / edge (move). */
     const sheetHit = (vx: number, vy: number) => {
       const sh = sheetRef.current;
-      if (!sh) return null;
+      if (!sh || sheetLockedRef.current) return null;
       const { sx, sy, ex, ey } = sheetScreen(sh);
       const corners = [
         [sx, sy],
@@ -714,6 +749,7 @@ export default function CadEditor() {
           sh.h = h;
           sh.x = p.x < sheetDrag.ax ? sheetDrag.ax - w : sheetDrag.ax;
           sh.y = p.y < sheetDrag.ay ? sheetDrag.ay - h : sheetDrag.ay;
+          syncMarkerSize(); // numbers follow the frame's scale while it is resized
         }
         cv.requestRenderAll();
         return;
@@ -1034,6 +1070,7 @@ export default function CadEditor() {
     if (!sh) return;
     setLoading("Creazione immagine A4…");
     await new Promise((r) => setTimeout(r, 30));
+    syncMarkerSize();
     const only = onlyChecked && onlyRef.current ? onlyRef.current : undefined;
     const blob = await layerRef.current.toSheetPngBlob(sh, only);
     setLoading(null);
@@ -1361,9 +1398,10 @@ export default function CadEditor() {
               </button>
               <button
                 aria-label="Foglio sulla selezione"
+                disabled={sheetLocked}
                 onClick={sheetOnSelection}
                 title="Seleziona una parte del disegno, poi premi qui: il foglio A4 si mette intorno, al centro"
-                className="rounded-md border border-border px-2 py-1 hover:bg-accent"
+                className="rounded-md border border-border px-2 py-1 hover:bg-accent disabled:opacity-40"
               >
                 Foglio sulla selezione
               </button>
@@ -1375,7 +1413,7 @@ export default function CadEditor() {
                     checked={onlyChecked}
                     onChange={(e) => setOnlyChecked(e.target.checked)}
                   />
-                  Solo i {onlyCount} scelti
+                  Solo i {onlyCount} scelti (più i numeri)
                 </label>
               )}
               {sheetOn && (
@@ -1393,6 +1431,7 @@ export default function CadEditor() {
                         key={o.label}
                         aria-label={o.label}
                         aria-pressed={sheetLand === o.land}
+                        disabled={sheetLocked}
                         onClick={() => chooseOrientation(o.land)}
                         className={`rounded-md px-2 py-1 ${sheetLand === o.land ? "bg-primary text-primary-foreground" : "hover:bg-accent"}`}
                       >
@@ -1402,6 +1441,7 @@ export default function CadEditor() {
                   </div>
                   <button
                     aria-label="Adatta al disegno"
+                    disabled={sheetLocked}
                     onClick={() => {
                       placeSheet(sheetLand);
                     }}
@@ -1409,6 +1449,20 @@ export default function CadEditor() {
                     className="rounded-md border border-border px-2 py-1 hover:bg-accent"
                   >
                     Adatta
+                  </button>
+                  <button
+                    aria-label={sheetLocked ? "Sblocca foglio" : "Fissa foglio"}
+                    aria-pressed={sheetLocked}
+                    onClick={toggleLock}
+                    title={
+                      sheetLocked
+                        ? "Foglio fissato: clicca per sbloccarlo e spostarlo"
+                        : "Fissa il foglio: ingrandisci e inserisci i numeri senza muoverlo"
+                    }
+                    className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 ${sheetLocked ? "border-amber-500 bg-amber-500/20" : "border-border hover:bg-accent"}`}
+                  >
+                    {sheetLocked ? <Lock className="h-4 w-4" /> : <LockOpen className="h-4 w-4" />}
+                    {sheetLocked ? "Fissato" : "Fissa"}
                   </button>
                   <div
                     className="flex items-center gap-1"
@@ -1424,6 +1478,7 @@ export default function CadEditor() {
                         onClick={() => {
                           markerSizeRef.current = sz;
                           setMarkerSizeState(sz);
+                          syncMarkerSize();
                         }}
                         className={`rounded-md px-2 py-1 ${markerSize === sz ? "bg-primary text-primary-foreground" : "hover:bg-accent"}`}
                       >
@@ -1431,14 +1486,6 @@ export default function CadEditor() {
                       </button>
                     ))}
                   </div>
-                  <button
-                    aria-label="Uniforma numeri"
-                    onClick={uniformNumbers}
-                    title="Porta tutti i numeri alla misura scelta, uguale sul foglio"
-                    className="rounded-md border border-border px-2 py-1 hover:bg-accent"
-                  >
-                    Uniforma numeri
-                  </button>
                 </>
               )}
             </div>
@@ -1515,6 +1562,7 @@ export default function CadEditor() {
                       onClick={() => {
                         markerSizeRef.current = sz;
                         setMarkerSizeState(sz);
+                        syncMarkerSize();
                       }}
                       className={`h-8 w-8 rounded-md font-semibold ${markerSize === sz ? "bg-primary text-primary-foreground" : "hover:bg-accent"}`}
                     >

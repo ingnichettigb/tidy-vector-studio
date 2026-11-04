@@ -799,9 +799,17 @@ export class DrawingLayer {
    */
   toSheetPngBlob(sheet: Sheet, only?: Iterable<number>): Promise<Blob | null> {
     if (only) {
-      // export just these entities: draw them from a layer of their own
+      // export just the chosen entities, plus the circled numbers (their own layer, and they
+      // are placed after the frame was fitted); drawn from a layer of their own
+      const keep = new Set(only);
+      this.items.forEach((e, i) => {
+        if (e && e.type === "marker") keep.add(i);
+      });
       const sub = new DrawingLayer(
-        [...only].map((i) => this.items[i]).filter((e): e is Ent => !!e),
+        [...keep]
+          .sort((x, y) => x - y)
+          .map((i) => this.items[i])
+          .filter((e): e is Ent => !!e),
       );
       sub.hideMarkers = this.hideMarkers;
       return sub.toSheetPngBlob(sheet);
@@ -821,8 +829,8 @@ export class DrawingLayer {
     return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/png"));
   }
 
-  /** Give every circled number the same radius (undoable); returns how many changed. */
-  setMarkersRadius(r: number): number {
+  /** Give every circled number the same radius (undoable unless `record` is false); returns how many changed. */
+  setMarkersRadius(r: number, record = true): number {
     const changes: { i: number; from: Ent; to: Ent }[] = [];
     this.items.forEach((e, i) => {
       if (e && e.type === "marker" && Math.abs(e.r - r) > 1e-9) {
@@ -831,7 +839,7 @@ export class DrawingLayer {
         changes.push({ i, from: e, to });
       }
     });
-    if (changes.length) {
+    if (changes.length && record) {
       this.undoStack.push({ kind: "edit", changes });
       this.redoStack = [];
     }

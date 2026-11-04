@@ -479,3 +479,22 @@ describe("Numeri layer and selection frame", () => {
     ]);
   });
 });
+
+describe("number size follows the frame without touching the history", () => {
+  it("setMarkersRadius with record=false is not an undo step", () => {
+    const m = (x: number, r: number): Ent => ({
+      type: "marker",
+      x,
+      y: 0,
+      r,
+      n: "00",
+      color: "#111",
+    });
+    const d = new DrawingLayer([m(0, 3), m(10, 9)]);
+    expect(d.setMarkersRadius(5, false)).toBe(2);
+    expect(d.canUndo).toBe(false);
+    expect(d.items[0]).toMatchObject({ x: 0, r: 5 }); // position kept, size changed
+    expect(d.items[1]).toMatchObject({ x: 10, r: 5 });
+    expect(d.hitAt(0, 4.5, 0.1)).toBe(0); // picking uses the new size
+  });
+});
