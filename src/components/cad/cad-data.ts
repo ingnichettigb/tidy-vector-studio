@@ -13,7 +13,18 @@ export const PALETTE = [
 export type Ent =
   | { type: "line"; x1: number; y1: number; x2: number; y2: number; color: string; w?: number }
   | { type: "poly"; pts: { x: number; y: number }[]; color: string; w?: number }
-  | { type: "marker"; x: number; y: number; r: number; n: string; color: string; w?: number }
+  | {
+      type: "marker";
+      x: number;
+      y: number;
+      r: number;
+      n: string;
+      color: string;
+      w?: number;
+      /** point the number refers to: a leader line joins it to the circle */
+      tx?: number;
+      ty?: number;
+    }
   | { type: "rect"; x: number; y: number; w: number; h: number; color: string; sw?: number }
   | {
       type: "text";
@@ -84,6 +95,23 @@ export function fitSheet(
 
 /** Scene units per millimetre of paper for a frame. */
 export const sheetUnitsPerMm = (s: Sheet) => s.w / (s.land ? A4_MM.long : A4_MM.short);
+
+/** Radius of the dot at the end of a leader line, relative to the number's circle. */
+export const DOT_FACTOR = 0.18;
+
+/** Where a leader line leaves the circle (on its edge, toward the target); null without one. */
+export function leaderStart(e: {
+  x: number;
+  y: number;
+  r: number;
+  tx?: number;
+  ty?: number;
+}): [number, number] | null {
+  if (e.tx === undefined || e.ty === undefined) return null;
+  const d = Math.hypot(e.tx - e.x, e.ty - e.y);
+  if (d <= e.r) return null; // target inside the circle: nothing to join
+  return [e.x + ((e.tx - e.x) / d) * e.r, e.y + ((e.ty - e.y) / d) * e.r];
+}
 
 /** Font size of the number inside a circled-number marker (shrinks for long numbers). */
 export function markerFontSize(r: number, n: string): number {
@@ -266,8 +294,16 @@ export function toDxf(ents: Ent[], opts: { numbersOff?: boolean } = {}): string 
     g(20 + a, n(-y));
     g(30 + a, "0.0");
   };
-  const line = (x1: number, y1: number, x2: number, y2: number, c: number, w?: number) => {
-    entity("LINE", "AcDbLine", c, w);
+  const line = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    c: number,
+    w?: number,
+    layer = "0",
+  ) => {
+    entity("LINE", "AcDbLine", c, w, layer);
     point(0, x1, y1);
     point(1, x2, y2);
   };
@@ -300,6 +336,14 @@ export function toDxf(ents: Ent[], opts: { numbersOff?: boolean } = {}): string 
       point(1, e.x, e.y);
       g(100, "AcDbText");
       g(73, 2);
+      // leader line to the point the number refers to, ending in a small dot
+      const from = leaderStart(e);
+      if (from && e.tx !== undefined && e.ty !== undefined) {
+        line(from[0], from[1], e.tx, e.ty, c, e.w, NUMBERS_LAYER);
+        entity("CIRCLE", "AcDbCircle", c, e.w, NUMBERS_LAYER);
+        point(0, e.tx, e.ty);
+        g(40, n(e.r * DOT_FACTOR));
+      }
     } else {
       entity("TEXT", "AcDbText", aci(e.color));
       point(0, e.x, e.y + e.size);

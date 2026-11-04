@@ -6,6 +6,7 @@ import {
   THICKNESS,
   entWidth,
   fitSheet,
+  leaderStart,
   sheetRatio,
   sheetUnitsPerMm,
   lineweightToWidth,
@@ -496,5 +497,79 @@ describe("number size follows the frame without touching the history", () => {
     expect(d.items[0]).toMatchObject({ x: 0, r: 5 }); // position kept, size changed
     expect(d.items[1]).toMatchObject({ x: 10, r: 5 });
     expect(d.hitAt(0, 4.5, 0.1)).toBe(0); // picking uses the new size
+  });
+});
+
+describe("numbers with a leader line", () => {
+  const led = (): Ent => ({
+    type: "marker",
+    x: 100,
+    y: 100,
+    r: 10,
+    n: "03",
+    color: "#111",
+    w: 2,
+    tx: 200,
+    ty: 100,
+  });
+
+  it("starts the line on the circle edge toward the target; none when the target is inside", () => {
+    expect(leaderStart(led() as never)).toEqual([110, 100]);
+    expect(leaderStart({ x: 0, y: 0, r: 10, tx: 5, ty: 0 })).toBeNull();
+    expect(leaderStart({ x: 0, y: 0, r: 10 })).toBeNull();
+  });
+
+  it("is picked on the circle, on the line and on the dot; bounds include the target", () => {
+    const d = new DrawingLayer([led()]);
+    expect(d.hitAt(100, 100, 1)).toBe(0);
+    expect(d.hitAt(150, 100, 1)).toBe(0);
+    expect(d.hitAt(200, 100, 1)).toBe(0);
+    expect(d.hitAt(150, 130, 1)).toBe(-1);
+    expect(d.bounds()!.x2).toBeGreaterThan(200);
+    expect(d.hitTarget(200, 100, 2)).toBe(0);
+    expect(d.hitTarget(100, 100, 2)).toBe(-1);
+    // crossing box that only touches the line, far from the circle
+    expect(d.touchRect({ x: 140, y: 90 }, { x: 160, y: 110 })).toEqual([0]);
+    expect(d.touchRect({ x: 140, y: 120 }, { x: 160, y: 140 })).toEqual([]);
+  });
+
+  it("moving the number keeps the target; moving a group moves both; undo restores", () => {
+    const d = new DrawingLayer([led()]);
+    d.translate([0], 30, 40, true);
+    d.recordMove([0], 30, 40, true);
+    expect(d.items[0]).toMatchObject({ x: 130, y: 140, tx: 200, ty: 100 });
+    d.undo();
+    expect(d.items[0]).toMatchObject({ x: 100, y: 100, tx: 200, ty: 100 });
+    d.redo();
+    expect(d.items[0]).toMatchObject({ x: 130, y: 140, tx: 200, ty: 100 });
+    const g = new DrawingLayer([led()]);
+    g.translate([0], 30, 40); // as part of a group: everything moves
+    expect(g.items[0]).toMatchObject({ x: 130, y: 140, tx: 230, ty: 140 });
+  });
+
+  it("moves the target alone as one undoable step", () => {
+    const d = new DrawingLayer([led()]);
+    const from = structuredClone(d.items[0]!);
+    d.setTarget(0, 150, 160);
+    d.setTarget(0, 160, 170);
+    d.recordEdit(0, from);
+    expect(d.items[0]).toMatchObject({ x: 100, y: 100, tx: 160, ty: 170 });
+    d.undo();
+    expect(d.items[0]).toMatchObject({ tx: 200, ty: 100 });
+    d.redo();
+    expect(d.items[0]).toMatchObject({ tx: 160, ty: 170 });
+  });
+
+  it("writes the line and the dot to the DXF on the NUMERI layer", () => {
+    const t = toDxf([led()]);
+    const L = t.split("\n");
+    const kinds: string[] = [];
+    for (let i = 0; i < L.length - 1; i += 2)
+      if (L[i] === "0" && ["LINE", "CIRCLE", "TEXT"].includes(L[i + 1]!)) {
+        let layer = "";
+        for (let j = i; j < i + 12; j += 2) if (L[j] === "8") layer = L[j + 1]!;
+        kinds.push(L[i + 1] + ":" + layer);
+      }
+    expect(kinds).toEqual(["CIRCLE:NUMERI", "TEXT:NUMERI", "LINE:NUMERI", "CIRCLE:NUMERI"]);
   });
 });

@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import {
   DEFAULT_THICKNESS,
+  DOT_FACTOR,
   MARKER_MM,
   PALETTE,
   THICKNESS,
@@ -482,7 +483,17 @@ export default function CadEditor() {
       panning = false,
       erasing = false,
       sheetDrag: { mode: "move" | "resize"; ax: number; ay: number } | null = null,
-      moving: { x: number; y: number; dx: number; dy: number; idx: number[] } | null = null,
+      moving: {
+        x: number;
+        y: number;
+        dx: number;
+        dy: number;
+        idx: number[];
+        keep: boolean; // a lone number moves without its pointed-at spot
+        target?: { from: Ent }; // dragging the dot of a number, not the number
+      } | null = null,
+      // number tool: press on the spot to point at, drag to where the number goes
+      markerDrag: { x0: number; y0: number; x: number; y: number } | null = null,
       erasedIdx: number[] = [],
       marquee: {
         x0: number;
@@ -569,6 +580,41 @@ export default function CadEditor() {
       return inTab || onEdge ? { mode: "move" as const, ax: 0, ay: 0 } : null;
     };
 
+    // while dragging with the number tool: the spot, the leader line and where the number lands
+    const drawMarkerPreview = (ctx: CanvasRenderingContext2D) => {
+      const m = markerDrag;
+      if (!m) return;
+      const v = cv.viewportTransform!;
+      const z = v[0]!;
+      const [x0, y0, x1, y1] = [
+        m.x0 * z + v[4]!,
+        m.y0 * z + v[5]!,
+        m.x * z + v[4]!,
+        m.y * z + v[5]!,
+      ];
+      if (Math.hypot(x1 - x0, y1 - y0) <= 6) return;
+      const r = markerRadius() * z;
+      const d = Math.hypot(x1 - x0, y1 - y0);
+      ctx.save();
+      ctx.strokeStyle = colorRef.current;
+      ctx.fillStyle = colorRef.current;
+      ctx.lineWidth = Math.max(1, thickRef.current);
+      ctx.globalAlpha = 0.75;
+      if (d > r) {
+        ctx.beginPath();
+        ctx.moveTo(x1 + ((x0 - x1) / d) * r, y1 + ((y0 - y1) / d) * r);
+        ctx.lineTo(x0, y0);
+        ctx.stroke();
+      }
+      ctx.beginPath();
+      ctx.arc(x0, y0, Math.max(r * DOT_FACTOR, 2.2), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(x1, y1, r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    };
+
     // The drawing is painted by the DrawingLayer under Fabric's own objects (the preview),
     // selection highlight and rubber-band box on top.
     cv.on("before:render", ({ ctx }) =>
@@ -577,6 +623,7 @@ export default function CadEditor() {
     cv.on("after:render", ({ ctx }) => {
       layerRef.current.drawSelection(ctx, cv.viewportTransform);
       drawSheet(ctx);
+      if (markerDrag) drawMarkerPreview(ctx);
       if (marquee) {
         const x = Math.min(marquee.x0, marquee.x1),
           y = Math.min(marquee.y0, marquee.y1);
@@ -616,6 +663,31 @@ export default function CadEditor() {
       lastErase = { x: p.x, y: p.y };
     };
 
+    const markerRadius = () =>
+      sheetRef.current
+        ? MARKER_MM[markerSizeRef.current] * sheetUnitsPerMm(sheetRef.current)
+        : MARKER_RADIUS_PX[markerSizeRef.current] / cv.getZoom();
+
+    /** Put a circled number at (x, y); with (tx, ty) it gets a leader line to that spot. */
+    const placeMarker = (x: number, y: number, tx?: number, ty?: number) => {
+      if (layerRef.current.hideMarkers) setNumbersVisible(true); // a new number needs its layer on
+      const n = String(markerNextRef.current).padStart(2, "0");
+      layerRef.current.addUndoable({
+        type: "marker",
+        x,
+        y,
+        r: markerRadius(),
+        n,
+        color: colorRef.current,
+        w: thickRef.current,
+        ...(tx !== undefined && ty !== undefined ? { tx, ty } : {}),
+      });
+      setMarkerNext(markerNextRef.current + 1);
+      syncHist();
+      cv.requestRenderAll();
+      log(tx !== undefined ? `Numero ${n} inserito con linea` : `Numero ${n} inserito`);
+    };
+
     cv.on("mouse:down", (opt) => {
       const t = toolRef.current;
       const ev = opt.e as MouseEvent;
@@ -647,9 +719,28 @@ export default function CadEditor() {
         return;
       }
       if (t === "move") {
-        // drag an element (or the whole selection, when the element is part of it)
+        // drag an element (or the whole selection, when the element is part of it);
+        // the dot of a number's leader line is dragged on its own
         const p = cv.getScenePoint(ev);
         const L = layerRef.current;
+        const dot = L.hitTarget(p.x, p.y, 8 / cv.getZoom());
+        if (dot >= 0) {
+          L.selected.clear();
+          L.selected.add(dot);
+          moving = {
+            x: p.x,
+            y: p.y,
+            dx: 0,
+            dy: 0,
+            idx: [dot],
+            keep: false,
+            target: { from: structuredClone(L.items[dot]!) },
+          };
+          syncMarker();
+          cv.setCursor("grabbing");
+          cv.requestRenderAll();
+          return;
+        }
         const hit = L.hitAt(p.x, p.y, 6 / cv.getZoom());
         if (hit < 0) {
           L.selected.clear();
@@ -661,7 +752,15 @@ export default function CadEditor() {
           L.selected.clear();
           L.selected.add(hit);
         }
-        moving = { x: p.x, y: p.y, dx: 0, dy: 0, idx: [...L.selected] };
+        const idx = [...L.selected];
+        moving = {
+          x: p.x,
+          y: p.y,
+          dx: 0,
+          dy: 0,
+          idx,
+          keep: idx.length === 1 && L.items[idx[0]!]?.type === "marker",
+        };
         cv.setCursor("grabbing");
         cv.requestRenderAll();
         return;
@@ -686,23 +785,7 @@ export default function CadEditor() {
       }
       if (t === "marker") {
         const p = cv.getScenePoint(ev);
-        if (layerRef.current.hideMarkers) setNumbersVisible(true); // a new number needs its layer on
-        const n = String(markerNextRef.current).padStart(2, "0");
-        layerRef.current.addUndoable({
-          type: "marker",
-          x: p.x,
-          y: p.y,
-          r: sheetRef.current
-            ? MARKER_MM[markerSizeRef.current] * sheetUnitsPerMm(sheetRef.current)
-            : MARKER_RADIUS_PX[markerSizeRef.current] / cv.getZoom(),
-          n,
-          color: colorRef.current,
-          w: thickRef.current,
-        });
-        setMarkerNext(markerNextRef.current + 1);
-        syncHist();
-        cv.requestRenderAll();
-        log(`Numero ${n} inserito`);
+        markerDrag = { x0: p.x, y0: p.y, x: p.x, y: p.y };
         return;
       }
       if (t === "line" || t === "rect") {
@@ -766,11 +849,19 @@ export default function CadEditor() {
         sweepErase(ev);
         return;
       }
+      if (markerDrag) {
+        const p = cv.getScenePoint(ev);
+        markerDrag.x = p.x;
+        markerDrag.y = p.y;
+        cv.requestRenderAll();
+        return;
+      }
       if (moving) {
         const p = cv.getScenePoint(ev);
         const dx = p.x - moving.x,
           dy = p.y - moving.y;
-        layerRef.current.translate(moving.idx, dx, dy);
+        if (moving.target) layerRef.current.setTarget(moving.idx[0]!, p.x, p.y);
+        else layerRef.current.translate(moving.idx, dx, dy, moving.keep);
         moving.x = p.x;
         moving.y = p.y;
         moving.dx += dx;
@@ -803,6 +894,14 @@ export default function CadEditor() {
         sheetDrag = null;
         return;
       }
+      if (markerDrag) {
+        const m = markerDrag;
+        markerDrag = null;
+        const dragged = Math.hypot(m.x - m.x0, m.y - m.y0) * cv.getZoom() > 6;
+        if (dragged) placeMarker(m.x, m.y, m.x0, m.y0);
+        else placeMarker(m.x0, m.y0);
+        return;
+      }
       if (panning) {
         panning = false;
         cv.setCursor(toolRef.current === "pan" ? "grab" : "default");
@@ -812,11 +911,18 @@ export default function CadEditor() {
         const m = moving;
         moving = null;
         cv.setCursor("move");
-        layerRef.current.recordMove(m.idx, m.dx, m.dy);
+        if (m.target) layerRef.current.recordEdit(m.idx[0]!, m.target.from);
+        else layerRef.current.recordMove(m.idx, m.dx, m.dy, m.keep);
         syncHist();
         syncMarker();
         if (m.dx || m.dy)
-          log(m.idx.length > 1 ? `${m.idx.length} elementi spostati` : "Elemento spostato");
+          log(
+            m.target
+              ? "Punto del numero spostato"
+              : m.idx.length > 1
+                ? `${m.idx.length} elementi spostati`
+                : "Elemento spostato",
+          );
         else
           log(m.idx.length === 1 ? "Elemento selezionato" : `${m.idx.length} elementi selezionati`);
         return;

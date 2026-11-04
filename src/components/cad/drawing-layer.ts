@@ -1,9 +1,11 @@
 // Pulizia DWG - revisione 2 novembre 2026
 import {
   A4_MM,
+  DOT_FACTOR,
   EXPORT_DPI,
   PEN_MM_PER_PX,
   entWidth,
+  leaderStart,
   markerFontSize,
   withWidth,
   type Ent,
@@ -103,8 +105,17 @@ function entBounds(e: Ent): [number, number, number, number] {
     }
     case "rect":
       return [e.x, e.y, e.x + e.w, e.y + e.h];
-    case "marker":
-      return [e.x - e.r, e.y - e.r, e.x + e.r, e.y + e.r];
+    case "marker": {
+      const dot = e.r * DOT_FACTOR;
+      const tx = e.tx ?? e.x,
+        ty = e.ty ?? e.y;
+      return [
+        Math.min(e.x - e.r, tx - dot),
+        Math.min(e.y - e.r, ty - dot),
+        Math.max(e.x + e.r, tx + dot),
+        Math.max(e.y + e.r, ty + dot),
+      ];
+    }
     case "text": {
       const { w, h } = textBox(e);
       const a = ((e.angle ?? 0) * Math.PI) / 180,
@@ -137,8 +148,16 @@ function hitsEnt(e: Ent, x: number, y: number, tol: number): boolean {
         distToSegment(x, y, e.x, b, e.x, e.y) <= tol
       );
     }
-    case "marker": // the whole disc is clickable, not just the outline
-      return Math.hypot(x - e.x, y - e.y) <= e.r + tol;
+    case "marker": {
+      // the whole disc is clickable, not just the outline; so are the leader line and its dot
+      if (Math.hypot(x - e.x, y - e.y) <= e.r + tol) return true;
+      const from = leaderStart(e);
+      if (!from) return false;
+      return (
+        distToSegment(x, y, from[0], from[1], e.tx!, e.ty!) <= tol ||
+        Math.hypot(x - e.tx!, y - e.ty!) <= e.r * DOT_FACTOR + tol
+      );
+    }
     case "text": {
       const a = ((e.angle ?? 0) * Math.PI) / 180;
       const dx = x - e.x,
@@ -151,10 +170,12 @@ function hitsEnt(e: Ent, x: number, y: number, tol: number): boolean {
   }
 }
 
-function moveEnt(e: Ent, dx: number, dy: number): Ent {
+function moveEnt(e: Ent, dx: number, dy: number, keepTarget = false): Ent {
   if (e.type === "line")
     return { ...e, x1: e.x1 + dx, y1: e.y1 + dy, x2: e.x2 + dx, y2: e.y2 + dy };
   if (e.type === "poly") return { ...e, pts: e.pts.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
+  if (e.type === "marker" && e.tx !== undefined && e.ty !== undefined && !keepTarget)
+    return { ...e, x: e.x + dx, y: e.y + dy, tx: e.tx + dx, ty: e.ty + dy };
   return { ...e, x: e.x + dx, y: e.y + dy };
 }
 
@@ -171,6 +192,11 @@ function addPath(ctx: CanvasRenderingContext2D, e: Ent) {
   } else if (e.type === "marker") {
     ctx.moveTo(e.x + e.r, e.y);
     ctx.arc(e.x, e.y, e.r, 0, Math.PI * 2);
+    const from = leaderStart(e);
+    if (from) {
+      ctx.moveTo(from[0], from[1]);
+      ctx.lineTo(e.tx!, e.ty!);
+    }
   }
 }
 
@@ -230,8 +256,17 @@ function touchesRect(e: Ent, x1: number, y1: number, x2: number, y2: number): bo
         segHitsRect(e.x, b, e.x, e.y, x1, y1, x2, y2)
       );
     }
+    case "marker": {
+      // the circle, or its leader line, or the dot at the end of it
+      if (e.x + e.r >= x1 && e.x - e.r <= x2 && e.y + e.r >= y1 && e.y - e.r <= y2) return true;
+      const from = leaderStart(e);
+      if (!from) return false;
+      return (
+        segHitsRect(from[0], from[1], e.tx!, e.ty!, x1, y1, x2, y2) ||
+        (e.tx! >= x1 && e.tx! <= x2 && e.ty! >= y1 && e.ty! <= y2)
+      );
+    }
     case "text":
-    case "marker":
       return true; // the caller already checked its bounding box overlaps the rectangle
   }
 }
@@ -241,7 +276,7 @@ type Action =
   | { kind: "remove" | "add"; idx: number[] }
   | { kind: "width"; changes: WidthChange[] }
   | { kind: "trim"; removed: number[]; added: number[] }
-  | { kind: "move"; idx: number[]; dx: number; dy: number }
+  | { kind: "move"; idx: number[]; dx: number; dy: number; keepTarget?: boolean }
   | { kind: "edit"; changes: { i: number; from: Ent; to: Ent }[] };
 
 type Bucket = { color: string; w: number; idx: number[] };
@@ -394,17 +429,41 @@ export class DrawingLayer {
   }
 
   /** Move entities with no history (live while dragging); call `recordMove` when done. */
-  translate(idx: Iterable<number>, dx: number, dy: number) {
+  translate(idx: Iterable<number>, dx: number, dy: number, keepTarget = false) {
     for (const i of idx) {
       const e = this.items[i];
-      if (e) this.setItem(i, moveEnt(e, dx, dy));
+      if (e) this.setItem(i, moveEnt(e, dx, dy, keepTarget));
     }
   }
 
+  /** Topmost number whose leader dot is within `tol` of (x, y), or -1. */
+  hitTarget(x: number, y: number, tol: number): number {
+    for (let i = this.items.length - 1; i >= 0; i--) {
+      const e = this.items[i];
+      if (!e || e.type !== "marker" || !this.shown(e) || !leaderStart(e)) continue;
+      if (Math.hypot(x - e.tx!, y - e.ty!) <= e.r * DOT_FACTOR + tol) return i;
+    }
+    return -1;
+  }
+
+  /** Move the point a number refers to (no history while dragging; see `recordEdit`). */
+  setTarget(i: number, tx: number, ty: number) {
+    const e = this.items[i];
+    if (e && e.type === "marker") this.setItem(i, { ...e, tx, ty });
+  }
+
+  /** Register an entity change already made (`from` is how it was) as one undoable step. */
+  recordEdit(i: number, from: Ent) {
+    const to = this.items[i];
+    if (!to || JSON.stringify(to) === JSON.stringify(from)) return;
+    this.undoStack.push({ kind: "edit", changes: [{ i, from, to }] });
+    this.redoStack = [];
+  }
+
   /** Register a finished drag as one undoable step. */
-  recordMove(idx: number[], dx: number, dy: number) {
+  recordMove(idx: number[], dx: number, dy: number, keepTarget = false) {
     if (!idx.length || (!dx && !dy)) return;
-    this.undoStack.push({ kind: "move", idx, dx, dy });
+    this.undoStack.push({ kind: "move", idx, dx, dy, keepTarget });
     this.redoStack = [];
   }
 
@@ -524,7 +583,7 @@ export class DrawingLayer {
   private apply(a: Action, undo: boolean): number {
     if (a.kind === "move") {
       const k = undo ? -1 : 1;
-      this.translate(a.idx, a.dx * k, a.dy * k);
+      this.translate(a.idx, a.dx * k, a.dy * k, a.keepTarget);
       return a.idx.length;
     }
     if (a.kind === "edit") {
@@ -758,12 +817,17 @@ export class DrawingLayer {
     for (const i of this.labels) {
       const e = this.items[i];
       if (!e || e.type !== "marker") continue;
-      const size = markerFontSize(e.r, e.n);
-      if (size * z < 3) continue;
       const k = i * 4;
       if (bb[k + 2]! < vx1 || bb[k]! > vx2 || bb[k + 3]! < vy1 || bb[k + 1]! > vy2) continue;
-      ctx.font = `bold ${size}px "JetBrains Mono", monospace`;
       ctx.fillStyle = e.color;
+      if (leaderStart(e)) {
+        ctx.beginPath();
+        ctx.arc(e.tx!, e.ty!, Math.max(e.r * DOT_FACTOR, 2.2 / z), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      const size = markerFontSize(e.r, e.n);
+      if (size * z < 3) continue;
+      ctx.font = `bold ${size}px "JetBrains Mono", monospace`;
       ctx.fillText(e.n, e.x, e.y + size * 0.06);
     }
     ctx.textAlign = "start";
