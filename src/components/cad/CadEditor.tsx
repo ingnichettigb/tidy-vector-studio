@@ -9,6 +9,7 @@ import {
   Eraser,
   Scissors,
   Frame,
+  Save,
   Eye,
   Lock,
   LockOpen,
@@ -46,6 +47,7 @@ import {
 } from "./cad-data";
 import { DrawingLayer } from "./drawing-layer";
 import { parseDxf } from "./dxf-import";
+import { buildProject, parseProject } from "./project-file";
 import { cleanFileName, downloadBlob, pickFileToOpen, saveWithPicker } from "./save-file";
 import {
   Dialog,
@@ -1075,8 +1077,107 @@ export default function CadEditor() {
     return () => window.removeEventListener("keydown", onKey);
   }, [deleteSelected, applyTool, undo, redo, copySelected, pasteClipboard]);
 
+  /** Reopen a saved project: drawing, numbers layer, A4 frame, settings and view. */
+  const openProject = async (f: File, handle: FileSystemFileHandle | null) => {
+    setLoading("Lettura progetto…");
+    try {
+      const r = parseProject(await f.text());
+      if (!r.ok) {
+        log(`Progetto non aperto: ${r.error}`);
+        return;
+      }
+      const p = r.project;
+      if (!p.ents.length) {
+        log("Il progetto non contiene elementi");
+        return;
+      }
+      const cv = cvRef.current;
+      if (!cv) return;
+      setFileName(p.name);
+      fileHandleRef.current = handle;
+      loadDrawing(p.ents);
+      thickRef.current = p.settings.thickness;
+      setThickness(p.settings.thickness);
+      markerSizeRef.current = p.settings.markerSize;
+      setMarkerSizeState(p.settings.markerSize);
+      setMarkerNext(p.settings.markerNext);
+      setColor(p.settings.color);
+      layerRef.current.setMarkersVisible(!p.numbersHidden);
+      setNumbersHidden(p.numbersHidden);
+      if (p.sheet) {
+        sheetRef.current = { ...p.sheet };
+        setSheetOn(true);
+        setSheetLand(p.sheet.land);
+        sheetLockedRef.current = p.sheetLocked;
+        setSheetLocked(p.sheetLocked);
+        onlyRef.current = p.only;
+        setOnlyCount(p.only?.length ?? 0);
+        setOnlyChecked(p.onlyChecked);
+        syncMarkerSize();
+      }
+      if (p.view) {
+        cv.setViewportTransform(p.view as [number, number, number, number, number, number]);
+        setZoom(p.view[0]!);
+      }
+      cv.requestRenderAll();
+      log(
+        `${f.name}: progetto aperto (${p.ents.length} elementi` +
+          (r.dropped ? `, ${r.dropped} non validi saltati)` : ")"),
+      );
+    } catch (err) {
+      log(`Errore lettura progetto: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setLoading(null);
+    }
+  };
+
+  /** Save everything as a .json project that reopens exactly as it is now. */
+  const saveProject = async () => {
+    const cv = cvRef.current;
+    if (!cv) return;
+    const L = layerRef.current;
+    const ents: Ent[] = [];
+    const where = new Map<number, number>(); // layer index -> position in the file
+    L.items.forEach((e, i) => {
+      if (e) {
+        where.set(i, ents.length);
+        ents.push(e);
+      }
+    });
+    const sh = sheetRef.current;
+    const only = (onlyRef.current ?? [])
+      .map((i) => where.get(i))
+      .filter((i): i is number => i !== undefined);
+    const project = buildProject({
+      name: fileName,
+      ents,
+      numbersHidden: L.hideMarkers,
+      sheet: sh ? { ...sh } : null,
+      sheetLocked: sheetLockedRef.current,
+      only: only.length ? only : null,
+      onlyChecked,
+      settings: {
+        thickness: thickRef.current,
+        markerSize: markerSizeRef.current,
+        markerNext: markerNextRef.current,
+        color: colorRef.current,
+      },
+      view: [...cv.viewportTransform!],
+    });
+    await saveOutput(new Blob([JSON.stringify(project)], { type: "application/json" }), {
+      name: baseName() + "_progetto.json",
+      ext: ".json",
+      mime: "application/json",
+      label: "Progetto",
+    });
+  };
+
   const handleFile = async (f: File, handle: FileSystemFileHandle | null = null) => {
     const ext = f.name.split(".").pop()?.toLowerCase();
+    if (ext === "json") {
+      await openProject(f, handle);
+      return;
+    }
     if (ext === "dwg") {
       log("DWG binario: salvalo come DXF da AutoCAD/LibreCAD e riaprilo");
       return;
@@ -1314,14 +1415,15 @@ export default function CadEditor() {
         <div className="flex items-center gap-2 border-l border-border px-4">
           <button
             onClick={openFile}
+            title="Apri un disegno DXF o un progetto salvato (.json)"
             className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm hover:bg-accent"
           >
-            <Upload className="h-4 w-4" /> Carica DXF
+            <Upload className="h-4 w-4" /> Apri file
           </button>
           <input
             ref={inputRef}
             type="file"
-            accept=".dxf"
+            accept=".dxf,.json"
             className="hidden"
             onChange={(e) => {
               const f = e.target.files?.[0];
@@ -1338,6 +1440,13 @@ export default function CadEditor() {
               <Frame className="h-4 w-4" /> Esporta A4
             </button>
           )}
+          <button
+            onClick={saveProject}
+            title="Salva tutto in un file .json: disegno, numeri, foglio A4, impostazioni e vista"
+            className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm hover:bg-accent"
+          >
+            <Save className="h-4 w-4" /> Salva progetto
+          </button>
           <button
             onClick={exportPng}
             title="Salva come immagine PNG con sfondo trasparente"

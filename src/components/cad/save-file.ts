@@ -45,7 +45,12 @@ export async function pickFileToOpen(): Promise<
   try {
     const [handle] = await w.showOpenFilePicker({
       multiple: false,
-      types: [{ description: "Disegno DXF", accept: { "application/dxf": [".dxf"] } }],
+      types: [
+        {
+          description: "Disegno DXF o progetto",
+          accept: { "application/dxf": [".dxf"], "application/json": [".json"] },
+        },
+      ],
     });
     if (!handle) return null;
     return { file: await handle.getFile(), handle };
@@ -114,6 +119,6 @@ export function cleanFileName(name: string, ext: string): string {
   const base = name
     .replace(/[\\/:*?"<>|]+/g, "_")
     .trim()
-    .replace(/\.(dxf|png|dwg)$/i, "");
+    .replace(/\.(dxf|png|dwg|json)$/i, "");
   return (base || "disegno") + ext;
 }

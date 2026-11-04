@@ -14,6 +14,7 @@ import {
   widthToLineweight,
   type Ent,
 } from "@/components/cad/cad-data";
+import { buildProject, isEnt, parseProject } from "@/components/cad/project-file";
 import { DrawingLayer } from "@/components/cad/drawing-layer";
 import { parseDxf } from "@/components/cad/dxf-import";
 
@@ -571,5 +572,88 @@ describe("numbers with a leader line", () => {
         kinds.push(L[i + 1] + ":" + layer);
       }
     expect(kinds).toEqual(["CIRCLE:NUMERI", "TEXT:NUMERI", "LINE:NUMERI", "CIRCLE:NUMERI"]);
+  });
+});
+
+describe("project file", () => {
+  const ents: Ent[] = [
+    { type: "line", x1: 0, y1: 0, x2: 10, y2: 0, color: "#111", w: 3 },
+    { type: "marker", x: 5, y: 5, r: 3, n: "07", color: "#111", w: 2, tx: 20, ty: 20 },
+    { type: "text", x: 1, y: 1, text: "ciao", size: 4, color: "#c00" },
+  ];
+  const base = {
+    name: "pianta.dxf",
+    ents,
+    numbersHidden: true,
+    sheet: { x: 1, y: 2, w: 210, h: 297, land: false },
+    sheetLocked: true,
+    only: [1, 2],
+    onlyChecked: true,
+    settings: { thickness: 5, markerSize: "L" as const, markerNext: 8, color: "#ff0000" },
+    view: [2, 0, 0, 2, 10, 20],
+  };
+
+  it("saves and reopens everything", () => {
+    const r = parseProject(JSON.stringify(buildProject(base)));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.dropped).toBe(0);
+    expect(r.project).toMatchObject(base);
+  });
+
+  it("drops invalid entities and keeps the chosen-elements list in step", () => {
+    const bad = JSON.stringify({
+      ...buildProject(base),
+      ents: [{ type: "line", x1: "x" }, ...ents],
+      only: [0, 2, 3],
+    });
+    const r = parseProject(bad);
+    expect(r.ok && r.dropped).toBe(1);
+    if (r.ok) {
+      expect(r.project.ents).toHaveLength(3);
+      expect(r.project.only).toEqual([1, 2]); // index 0 was dropped, 2 and 3 shift by one
+    }
+  });
+
+  it("refuses files that are not a project, or are damaged", () => {
+    expect(parseProject("not json").ok).toBe(false);
+    expect(parseProject(JSON.stringify({ hello: 1 })).ok).toBe(false);
+    expect(parseProject(JSON.stringify({ app: "pulizia-dwg", version: 99, ents: [] })).ok).toBe(
+      false,
+    );
+    expect(parseProject(JSON.stringify({ app: "pulizia-dwg", version: 1 })).ok).toBe(false);
+  });
+
+  it("falls back to defaults for missing settings and a broken frame", () => {
+    const r = parseProject(
+      JSON.stringify({
+        app: "pulizia-dwg",
+        version: 1,
+        ents,
+        sheet: { x: 0, y: 0, w: -5, h: 1 },
+        sheetLocked: true,
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.project.sheet).toBeNull();
+      expect(r.project.sheetLocked).toBe(false);
+      expect(r.project.settings).toEqual({
+        thickness: 3,
+        markerSize: "M",
+        markerNext: 0,
+        color: "#111111",
+      });
+      expect(r.project.view).toBeNull();
+      expect(r.project.numbersHidden).toBe(false);
+    }
+  });
+
+  it("recognises well-formed entities only", () => {
+    expect(isEnt(ents[1])).toBe(true);
+    expect(isEnt({ ...ents[1]!, ty: undefined })).toBe(false); // target needs both coordinates
+    expect(isEnt({ type: "marker", x: 1, y: 1, r: 0, n: "1", color: "#111" })).toBe(false);
+    expect(isEnt({ type: "poly", pts: [{ x: 0, y: 0 }], color: "#111" })).toBe(false);
+    expect(isEnt(null)).toBe(false);
   });
 });
