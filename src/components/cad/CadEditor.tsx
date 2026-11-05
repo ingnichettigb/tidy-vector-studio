@@ -1,4 +1,16 @@
-// Pulizia DWG - revisione 2 novembre 2026
+/**
+ * =======================================================================
+ * File:        CadEditor.tsx
+ * Percorso:    (src/components/cad/CadEditor.tsx)
+ * Revisione:   Rev. 1.1
+ * Data:        05/11/2026
+ * -----------------------------------------------------------------------
+ * Storico Revisioni (max 10 voci, oltre la decima si sostituisce la più vecchia):
+ * [02/11/2026] Rev. 1.0 - Editor CAD: linea comandi, strumenti, foglio A4, numeri, progetto
+ * [05/11/2026] Rev. 1.1 - Apertura dei file .dwg (dwg-import) e pulsante "Scarica come DXF"
+ *                         (dxf-blocks-export). Solo aggiunte: i flussi esistenti non cambiano.
+ * =======================================================================
+ */
 import { useCallback, useEffect, useRef, useState, type ComponentType } from "react";
 import { Canvas, Line, Rect, Point, type FabricObject } from "fabric";
 import {
@@ -25,6 +37,7 @@ import {
   Maximize,
   Upload,
   Download,
+  FileDown,
   ImageDown,
   Loader2,
   Terminal,
@@ -47,6 +60,8 @@ import {
 } from "./cad-data";
 import { DrawingLayer } from "./drawing-layer";
 import { parseDxf } from "./dxf-import";
+import { parseDwg } from "./dwg-import";
+import { drawingToDxf } from "./dxf-blocks-export";
 import { buildProject, parseProject } from "./project-file";
 import { cleanFileName, downloadBlob, pickFileToOpen, saveWithPicker } from "./save-file";
 import {
@@ -111,6 +126,8 @@ export default function CadEditor() {
   const [cmd, setCmd] = useState("");
   const [loading, setLoading] = useState<string | null>(null);
   const [fileName, setFileName] = useState("esempio_pianta.dwg");
+  // nome del DWG aperto: il pulsante "Scarica come DXF" compare solo finché è il file in uso
+  const [dwgName, setDwgName] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [zoom, setZoom] = useState(1);
   // line thickness for new shapes, and for the selection when it is changed (screen px)
@@ -1179,7 +1196,31 @@ export default function CadEditor() {
       return;
     }
     if (ext === "dwg") {
-      log("DWG binario: salvalo come DXF da AutoCAD/LibreCAD e riaprilo");
+      setLoading("Lettura DWG…");
+      try {
+        const r = await parseDwg(await f.arrayBuffer(), (step) => setLoading(step));
+        if (!r.ents.length) {
+          log("Nessuna entità supportata nel file DWG");
+          return;
+        }
+        setLoading(`Disegno di ${r.ents.length} entità…`);
+        await new Promise((res) => setTimeout(res, 30));
+        setFileName(f.name);
+        setDwgName(f.name);
+        fileHandleRef.current = handle;
+        loadDrawing(r.ents);
+        const skipped = Object.entries(r.skipped)
+          .map(([k, n]) => `${k} ${n}`)
+          .join(", ");
+        log(
+          `${f.name}: ${r.ents.length} entità caricate` +
+            (skipped ? ` (non supportate: ${skipped})` : ""),
+        );
+      } catch (err) {
+        log(`Errore lettura DWG: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        setLoading(null);
+      }
       return;
     }
     if (ext !== "dxf") {
@@ -1251,6 +1292,20 @@ export default function CadEditor() {
       ext: ".dxf",
       mime: "application/dxf",
       label: "DXF",
+    });
+  };
+
+  /** DXF a parte (R2000 con BLOCKS e handle) per il DWG aperto; "Esporta DXF" non cambia. */
+  const exportDxfBlocks = async () => {
+    if (!cvRef.current) return;
+    const dxf = drawingToDxf(layerRef.current.toEnts(), {
+      numbersOff: layerRef.current.hideMarkers,
+    });
+    await saveOutput(new Blob([dxf], { type: "application/dxf" }), {
+      name: baseName() + "_convertito.dxf",
+      ext: ".dxf",
+      mime: "application/dxf",
+      label: "DXF (con BLOCKS)",
     });
   };
 
@@ -1423,7 +1478,7 @@ export default function CadEditor() {
           <input
             ref={inputRef}
             type="file"
-            accept=".dxf,.json"
+            accept=".dxf,.dwg,.json"
             className="hidden"
             onChange={(e) => {
               const f = e.target.files?.[0];
@@ -1454,6 +1509,15 @@ export default function CadEditor() {
           >
             <ImageDown className="h-4 w-4" /> Esporta PNG
           </button>
+          {dwgName !== null && dwgName === fileName && (
+            <button
+              onClick={exportDxfBlocks}
+              title="Scarica il DWG aperto come DXF (R2000 con sezione BLOCKS)"
+              className="inline-flex items-center gap-2 rounded-md border border-primary px-3 py-2 text-sm hover:bg-accent"
+            >
+              <FileDown className="h-4 w-4" /> Scarica come DXF
+            </button>
+          )}
           <button
             onClick={exportDxf}
             className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"

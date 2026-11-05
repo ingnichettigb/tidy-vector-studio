@@ -1,4 +1,17 @@
 /**
+ * =======================================================================
+ * File:        save-file.ts
+ * Percorso:    (src/components/cad/save-file.ts)
+ * Revisione:   Rev. 1.1
+ * Data:        05/11/2026
+ * -----------------------------------------------------------------------
+ * Storico Revisioni (max 10 voci, oltre la decima si sostituisce la più vecchia):
+ * [04/11/2026] Rev. 1.0 - Finestra di salvataggio nativa, download di ripiego, nomi file
+ * [05/11/2026] Rev. 1.1 - Il selettore "Apri file" accetta anche i file .dwg (un solo punto)
+ * =======================================================================
+ */
+
+/**
  * Saving a file the way the user expects: a "Save as" window where they pick the folder and
  * the name, starting from the folder the drawing was opened from.
  *
@@ -47,8 +60,12 @@ export async function pickFileToOpen(): Promise<
       multiple: false,
       types: [
         {
-          description: "Disegno DXF o progetto",
-          accept: { "application/dxf": [".dxf"], "application/json": [".json"] },
+          description: "Disegno DWG, DXF o progetto",
+          accept: {
+            "application/acad": [".dwg"],
+            "application/dxf": [".dxf"],
+            "application/json": [".json"],
+          },
         },
       ],
     });
