@@ -20,6 +20,7 @@ import {
   Square,
   Eraser,
   Scissors,
+  Split,
   Frame,
   Save,
   Eye,
@@ -384,6 +385,19 @@ export default function CadEditor() {
     },
     [zoomExtents, syncHist],
   );
+
+  const explodeSelected = useCallback(() => {
+    const cv = cvRef.current;
+    if (!cv) return;
+    const n = layerRef.current.explodeSelected();
+    if (!n) {
+      log("Esplodi: seleziona prima una polilinea o un rettangolo");
+      return;
+    }
+    cv.requestRenderAll();
+    syncHist();
+    log(n > 1 ? `${n} polilinee esplose in linee` : "Polilinea esplosa in linee");
+  }, [log, syncHist]);
 
   const deleteSelected = useCallback(() => {
     const cv = cvRef.current;
@@ -1087,12 +1101,16 @@ export default function CadEditor() {
         t: "trim",
         m: "move",
       };
+      if (e.key.toLowerCase() === "x") {
+        explodeSelected();
+        return;
+      }
       const t = shortcut[e.key.toLowerCase()];
       if (t) applyTool(t);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [deleteSelected, applyTool, undo, redo, copySelected, pasteClipboard]);
+  }, [deleteSelected, explodeSelected, applyTool, undo, redo, copySelected, pasteClipboard]);
 
   /** Reopen a saved project: drawing, numbers layer, A4 frame, settings and view. */
   const openProject = async (f: File, handle: FileSystemFileHandle | null) => {
@@ -1369,6 +1387,8 @@ export default function CadEditor() {
     else if (["sposta", "move", "m"].includes(c)) {
       applyTool("move");
       log("SPOSTA attivo: trascina un elemento (o la selezione) dove vuoi");
+    } else if (["x", "esplodi", "espl", "explode"].includes(c)) {
+      explodeSelected();
     } else if (["trim", "taglia", "tr"].includes(c)) {
       applyTool("trim");
       log("TRIM attivo: clicca la parte di linea da tagliare fino agli incroci");
@@ -1541,6 +1561,14 @@ export default function CadEditor() {
               <t.icon className="h-5 w-5" />
             </button>
           ))}
+          <button
+            title="Esplodi: trasforma la polilinea selezionata in linee singole (X)"
+            aria-label="Esplodi"
+            onClick={explodeSelected}
+            className="grid h-11 w-11 place-items-center rounded-md text-foreground transition-colors hover:bg-accent"
+          >
+            <Split className="h-5 w-5" />
+          </button>
           <button
             title="Elimina (Canc)"
             aria-label="Elimina"

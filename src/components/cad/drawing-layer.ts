@@ -498,86 +498,157 @@ export class DrawingLayer {
   }
 
   /**
-   * Trim: cut away the part of the line under (x, y) that lies between the nearest crossings
-   * with other lines on each side (like AutoCAD's TRIM). Rectangles and polylines are split
-   * into lines first. Returns false when nothing was cut (no crossing, or nothing under the point).
+   * Trim (like AutoCAD's TRIM): treat the whole line / polyline / rectangle under (x, y) as one
+   * continuous path, find every crossing along it, and cut away the stretch between the two
+   * crossings nearest the pointer (or up to an open end). Works on spirals made of hundreds of
+   * tiny pieces. Returns false when nothing was cut.
    */
   trimAt(x: number, y: number, tol: number): boolean {
     const hit = this.hitAt(x, y, tol);
     const e = hit >= 0 ? this.items[hit] : null;
-    if (!e || !segmentsOf(e).length) return false;
+    if (!e) return false;
     const segs = segmentsOf(e);
-    // the piece of this entity the pointer is on
+    if (!segs.length) return false;
+    const pts = [{ x: segs[0]![0], y: segs[0]![1] }, ...segs.map((s) => ({ x: s[2], y: s[3] }))];
+    // where on the path the pointer is (s = segment index + position 0..1)
     let si = 0,
+      tc = 0,
       best = Infinity;
     segs.forEach((s, k) => {
-      const d = distToSegment(x, y, s[0], s[1], s[2], s[3]);
+      const dx = s[2] - s[0],
+        dy = s[3] - s[1];
+      const len2 = dx * dx + dy * dy;
+      const t = len2 ? Math.max(0, Math.min(1, ((x - s[0]) * dx + (y - s[1]) * dy) / len2)) : 0;
+      const d = Math.hypot(x - (s[0] + dx * t), y - (s[1] + dy * t));
       if (d < best) {
         best = d;
         si = k;
+        tc = t;
       }
     });
-    const seg = segs[si]!;
-    const dx = seg[2] - seg[0],
-      dy = seg[3] - seg[1];
-    const len2 = dx * dx + dy * dy;
-    if (!len2) return false;
-    const tc = Math.max(0, Math.min(1, ((x - seg[0]) * dx + (y - seg[1]) * dy) / len2));
-    let lo = 0,
-      hi = 1,
-      found = false;
-    const minX = Math.min(seg[0], seg[2]),
-      maxX = Math.max(seg[0], seg[2]),
-      minY = Math.min(seg[1], seg[3]),
-      maxY = Math.max(seg[1], seg[3]);
+    const click = si + tc;
+    const n = segs.length;
     const eps = 1e-6;
+    const cuts: number[] = [];
+    const closed = n > 2 && Math.hypot(pts[0]!.x - pts[n]!.x, pts[0]!.y - pts[n]!.y) < eps;
     for (let j = 0; j < this.items.length; j++) {
       const o = this.items[j];
       if (!o) continue;
-      const k = j * 4;
-      if (
-        this.bb[k]! > maxX ||
-        this.bb[k + 2]! < minX ||
-        this.bb[k + 1]! > maxY ||
-        this.bb[k + 3]! < minY
-      )
-        continue;
-      const others = j === hit ? segs.filter((_, n) => n !== si) : segmentsOf(o);
-      for (const b of others) {
-        const t = crossing(seg, b);
-        if (t === null) continue;
-        if (t < tc - eps && t > lo) {
-          lo = t;
-          found = true;
-        } else if (t > tc + eps && t < hi) {
-          hi = t;
-          found = true;
+      const others = j === hit ? segs : segmentsOf(o);
+      if (!others.length) continue;
+      const kb = j * 4;
+      const oMinX = this.bb[kb]!,
+        oMinY = this.bb[kb + 1]!,
+        oMaxX = this.bb[kb + 2]!,
+        oMaxY = this.bb[kb + 3]!;
+      for (let k = 0; k < n; k++) {
+        const s = segs[k]!;
+        if (
+          j !== hit &&
+          (Math.max(s[0], s[2]) < oMinX ||
+            Math.min(s[0], s[2]) > oMaxX ||
+            Math.max(s[1], s[3]) < oMinY ||
+            Math.min(s[1], s[3]) > oMaxY)
+        )
+          continue;
+        for (let m = 0; m < others.length; m++) {
+          if (j === hit) {
+            // skip itself and the neighbours sharing a vertex
+            if (Math.abs(k - m) <= 1) continue;
+            if (closed && Math.abs(k - m) === n - 1) continue;
+          }
+          const t = crossing(s, others[m]!);
+          if (t !== null) cuts.push(k + t);
         }
       }
     }
-    if (!found) return false;
-    const at = (t: number) => [seg[0] + dx * t, seg[1] + dy * t] as const;
+    // the crossings just before and just after the pointer
+    let lo = -Infinity,
+      hi = Infinity;
+    for (const c of cuts) {
+      if (c < click - eps && c > lo) lo = c;
+      if (c > click + eps && c < hi) hi = c;
+    }
+    if (closed) {
+      // a closed outline has no ends: wrap around, and it needs two different crossings
+      const uniq = new Set(cuts.map((c) => (((c % n) + n) % n).toFixed(6)));
+      if (uniq.size < 2) return false;
+      if (lo === -Infinity) lo = Math.max(...cuts) - n;
+      if (hi === Infinity) hi = Math.min(...cuts) + n;
+    } else {
+      if (lo === -Infinity && hi === Infinity) return false;
+      if (lo === -Infinity) lo = 0;
+      if (hi === Infinity) hi = n;
+    }
+    // points of the path between positions a < b (positions may run past n on closed paths)
+    const vtx = (i: number) => pts[((i % n) + n) % n]!;
+    const pointAt = (s: number) => {
+      const w = s < 0 ? s + n : s >= n ? s - n : s;
+      const k = Math.min(Math.floor(w), n - 1);
+      const f = w - k;
+      const g = segs[k]!;
+      return { x: g[0] + (g[2] - g[0]) * f, y: g[1] + (g[3] - g[1]) * f };
+    };
+    const span = (a: number, b: number) => {
+      const out = [pointAt(a)];
+      for (let i = Math.floor(a) + 1; i < b - eps; i++) out.push(closed ? vtx(i) : pts[i]!);
+      out.push(b >= n - eps && !closed ? pts[n]! : pointAt(b));
+      return out;
+    };
     const w = entWidth(e) ?? 1.5;
-    const piece = (a: Seg): Ent => ({
-      type: "line",
-      x1: a[0],
-      y1: a[1],
-      x2: a[2],
-      y2: a[3],
-      color: e.color,
-      w,
-    });
+    const make = (p: { x: number; y: number }[]): Ent | null => {
+      const q = p.filter(
+        (v, i) => i === 0 || Math.hypot(v.x - p[i - 1]!.x, v.y - p[i - 1]!.y) > eps,
+      );
+      if (q.length < 2) return null;
+      if (q.length === 2)
+        return {
+          type: "line",
+          x1: q[0]!.x,
+          y1: q[0]!.y,
+          x2: q[1]!.x,
+          y2: q[1]!.y,
+          color: e.color,
+          w,
+        };
+      return { type: "poly", pts: q, color: e.color, w };
+    };
     const keep: Ent[] = [];
-    segs.forEach((s, n) => {
-      if (n !== si) keep.push(piece(s));
-    });
-    if (lo > eps) keep.push(piece([seg[0], seg[1], ...at(lo)]));
-    if (hi < 1 - eps) keep.push(piece([...at(hi), seg[2], seg[3]]));
+    const pieces = closed
+      ? [span(hi, lo + n)]
+      : [lo > eps ? span(0, lo) : [], hi < n - eps ? span(hi, n) : []];
+    for (const p of pieces) {
+      const ent = make(p);
+      if (ent) keep.push(ent);
+    }
     this.remove(hit);
     const added = keep.map((k) => this.add(k));
     this.undoStack.push({ kind: "trim", removed: [hit], added });
     this.redoStack = [];
     return true;
+  }
+
+  /** Explode: split the selected polylines / rectangles into single lines (undoable). */
+  explodeSelected(): number {
+    const removed: number[] = [];
+    const added: number[] = [];
+    for (const i of [...this.selected]) {
+      const e = this.items[i];
+      if (!e || (e.type !== "poly" && e.type !== "rect")) continue;
+      const segs = segmentsOf(e);
+      const w = entWidth(e) ?? 1.5;
+      this.remove(i);
+      removed.push(i);
+      for (const s of segs)
+        added.push(
+          this.add({ type: "line", x1: s[0], y1: s[1], x2: s[2], y2: s[3], color: e.color, w }),
+        );
+    }
+    if (!removed.length) return 0;
+    this.undoStack.push({ kind: "trim", removed, added });
+    this.redoStack = [];
+    this.selected = new Set(added);
+    return removed.length;
   }
 
   private apply(a: Action, undo: boolean): number {

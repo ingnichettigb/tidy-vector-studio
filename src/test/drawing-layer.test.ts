@@ -327,13 +327,63 @@ describe("copy / paste and trim", () => {
     expect(rest).toMatchObject([{ x1: 0, x2: 30 }]);
   });
 
-  it("splits a rectangle side and leaves the other sides", () => {
+  it("trims a closed rectangle between two crossings and keeps the rest as one piece", () => {
+    const d = new DrawingLayer([
+      { type: "rect", x: 0, y: 0, w: 100, h: 50, color: "#111", sw: 3 },
+      L(50, -20, 50, 20),
+      L(70, -20, 70, 20),
+    ]);
+    expect(d.trimAt(60, 0, 3)).toBe(true);
+    const polys = d.toEnts().filter((e) => e.type === "poly");
+    expect(polys).toHaveLength(1);
+    const p = polys[0] as Extract<Ent, { type: "poly" }>;
+    expect(p.pts[0]!.x).toBeCloseTo(70);
+    expect(p.pts[p.pts.length - 1]!.x).toBeCloseTo(50);
+  });
+
+  it("does not trim a closed rectangle crossed only once", () => {
     const d = new DrawingLayer([
       { type: "rect", x: 0, y: 0, w: 100, h: 50, color: "#111", sw: 3 },
       L(50, -20, 50, 20),
     ]);
-    expect(d.trimAt(80, 0, 3)).toBe(true); // top side right of the crossing
-    expect(d.toEnts().filter((e) => e.type === "line")).toHaveLength(1 + 3 + 1);
+    expect(d.trimAt(80, 0, 3)).toBe(false);
+  });
+
+  it("trims a long polyline along its whole path, not only the piece under the pointer", () => {
+    // a curve made of 100 tiny pieces from x=0 to x=100, crossed at x=20 and x=80
+    const pts = Array.from({ length: 101 }, (_, i) => ({ x: i, y: Math.sin(i / 10) * 0.01 }));
+    const d = new DrawingLayer([
+      { type: "poly", pts, color: "#111" },
+      L(20.5, -5, 20.5, 5),
+      L(80.5, -5, 80.5, 5),
+    ]);
+    expect(d.trimAt(50, 0, 3)).toBe(true);
+    const polys = d.toEnts().filter((e) => e.type === "poly") as Extract<Ent, { type: "poly" }>[];
+    expect(polys).toHaveLength(2);
+    expect(polys[0]!.pts[polys[0]!.pts.length - 1]!.x).toBeCloseTo(20.5);
+    expect(polys[1]!.pts[0]!.x).toBeCloseTo(80.5);
+  });
+
+  it("explodes a selected polyline into single lines and undo restores it", () => {
+    const d = new DrawingLayer([
+      {
+        type: "poly",
+        pts: [
+          { x: 0, y: 0 },
+          { x: 10, y: 0 },
+          { x: 10, y: 10 },
+          { x: 0, y: 10 },
+        ],
+        color: "#111",
+      },
+    ]);
+    d.selected = new Set([0]);
+    expect(d.explodeSelected()).toBe(1);
+    expect(d.toEnts().filter((e) => e.type === "line")).toHaveLength(3);
+    expect(d.selected.size).toBe(3);
+    d.undo();
+    expect(d.toEnts()).toHaveLength(1);
+    expect(d.toEnts()[0]!.type).toBe("poly");
   });
 
   it("does nothing without a crossing", () => {
