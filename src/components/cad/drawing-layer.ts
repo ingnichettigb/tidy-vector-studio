@@ -529,18 +529,7 @@ export class DrawingLayer {
     const click = si + tc;
     const n = segs.length;
     const eps = 1e-6;
-    let lo = 0,
-      hi = n,
-      found = false;
-    const consider = (c: number) => {
-      if (c < click - eps && c > lo) {
-        lo = c;
-        found = true;
-      } else if (c > click + eps && c < hi) {
-        hi = c;
-        found = true;
-      }
-    };
+    const cuts: number[] = [];
     const closed = n > 2 && Math.hypot(pts[0]!.x - pts[n]!.x, pts[0]!.y - pts[n]!.y) < eps;
     for (let j = 0; j < this.items.length; j++) {
       const o = this.items[j];
@@ -569,45 +558,66 @@ export class DrawingLayer {
             if (closed && Math.abs(k - m) === n - 1) continue;
           }
           const t = crossing(s, others[m]!);
-          if (t !== null) consider(k + t);
+          if (t !== null) cuts.push(k + t);
         }
       }
     }
-    if (!found) return false;
+    // the crossings just before and just after the pointer
+    let lo = -Infinity,
+      hi = Infinity;
+    for (const c of cuts) {
+      if (c < click - eps && c > lo) lo = c;
+      if (c > click + eps && c < hi) hi = c;
+    }
+    if (closed) {
+      // a closed outline has no ends: wrap around, and it needs two different crossings
+      const uniq = new Set(cuts.map((c) => (((c % n) + n) % n).toFixed(6)));
+      if (uniq.size < 2) return false;
+      if (lo === -Infinity) lo = Math.max(...cuts) - n;
+      if (hi === Infinity) hi = Math.min(...cuts) + n;
+    } else {
+      if (lo === -Infinity && hi === Infinity) return false;
+      if (lo === -Infinity) lo = 0;
+      if (hi === Infinity) hi = n;
+    }
+    // points of the path between positions a < b (positions may run past n on closed paths)
+    const vtx = (i: number) => pts[((i % n) + n) % n]!;
     const pointAt = (s: number) => {
-      const k = Math.min(Math.floor(s), n - 1);
-      const f = s - k;
+      const w = ((s % n) + n) % n;
+      const k = Math.min(Math.floor(w), n - 1);
+      const f = w - k;
       const g = segs[k]!;
       return { x: g[0] + (g[2] - g[0]) * f, y: g[1] + (g[3] - g[1]) * f };
     };
+    const span = (a: number, b: number) => {
+      const out = [pointAt(a)];
+      for (let i = Math.floor(a) + 1; i < b - eps; i++) out.push(closed ? vtx(i) : pts[i]!);
+      out.push(b >= n - eps && !closed ? pts[n]! : pointAt(b));
+      return out;
+    };
     const w = entWidth(e) ?? 1.5;
     const make = (p: { x: number; y: number }[]): Ent | null => {
-      const q = p.filter((v, i) => i === 0 || Math.hypot(v.x - p[i - 1]!.x, v.y - p[i - 1]!.y) > eps);
+      const q = p.filter(
+        (v, i) => i === 0 || Math.hypot(v.x - p[i - 1]!.x, v.y - p[i - 1]!.y) > eps,
+      );
       if (q.length < 2) return null;
       if (q.length === 2)
-        return { type: "line", x1: q[0]!.x, y1: q[0]!.y, x2: q[1]!.x, y2: q[1]!.y, color: e.color, w };
+        return {
+          type: "line",
+          x1: q[0]!.x,
+          y1: q[0]!.y,
+          x2: q[1]!.x,
+          y2: q[1]!.y,
+          color: e.color,
+          w,
+        };
       return { type: "poly", pts: q, color: e.color, w };
     };
     const keep: Ent[] = [];
-    const head: { x: number; y: number }[] = [];
-    if (lo > eps) {
-      for (let i = 0; i <= Math.floor(lo); i++) head.push(pts[i]!);
-      head.push(pointAt(lo));
-    }
-    const tail: { x: number; y: number }[] = [];
-    if (hi < n - eps) {
-      tail.push(pointAt(hi));
-      for (let i = Math.ceil(hi); i <= n; i++) tail.push(pts[i]!);
-    }
-    if (closed && head.length && tail.length) {
-      // closed outline: what is left is one piece running through the start point
-      const one = make([...tail, ...head.slice(1)]);
-      if (one) keep.push(one);
-    } else {
-      for (const p of [head, tail]) {
-        const ent = make(p);
-        if (ent) keep.push(ent);
-      }
+    const pieces = closed ? [span(hi, lo + n)] : [lo > eps ? span(0, lo) : [], hi < n - eps ? span(hi, n) : []];
+    for (const p of pieces) {
+      const ent = make(p);
+      if (ent) keep.push(ent);
     }
     this.remove(hit);
     const added = keep.map((k) => this.add(k));
