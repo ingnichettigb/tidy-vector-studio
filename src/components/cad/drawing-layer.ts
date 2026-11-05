@@ -614,7 +614,9 @@ export class DrawingLayer {
       return { type: "poly", pts: q, color: e.color, w };
     };
     const keep: Ent[] = [];
-    const pieces = closed ? [span(hi, lo + n)] : [lo > eps ? span(0, lo) : [], hi < n - eps ? span(hi, n) : []];
+    const pieces = closed
+      ? [span(hi, lo + n)]
+      : [lo > eps ? span(0, lo) : [], hi < n - eps ? span(hi, n) : []];
     for (const p of pieces) {
       const ent = make(p);
       if (ent) keep.push(ent);
@@ -638,7 +640,9 @@ export class DrawingLayer {
       this.remove(i);
       removed.push(i);
       for (const s of segs)
-        added.push(this.add({ type: "line", x1: s[0], y1: s[1], x2: s[2], y2: s[3], color: e.color, w }));
+        added.push(
+          this.add({ type: "line", x1: s[0], y1: s[1], x2: s[2], y2: s[3], color: e.color, w }),
+        );
     }
     if (!removed.length) return 0;
     this.undoStack.push({ kind: "trim", removed, added });

@@ -366,7 +366,16 @@ describe("copy / paste and trim", () => {
 
   it("explodes a selected polyline into single lines and undo restores it", () => {
     const d = new DrawingLayer([
-      { type: "poly", pts: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }, { x: 0, y: 10 }], color: "#111" },
+      {
+        type: "poly",
+        pts: [
+          { x: 0, y: 0 },
+          { x: 10, y: 0 },
+          { x: 10, y: 10 },
+          { x: 0, y: 10 },
+        ],
+        color: "#111",
+      },
     ]);
     d.selected = new Set([0]);
     expect(d.explodeSelected()).toBe(1);
