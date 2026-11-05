@@ -583,7 +583,7 @@ export class DrawingLayer {
     // points of the path between positions a < b (positions may run past n on closed paths)
     const vtx = (i: number) => pts[((i % n) + n) % n]!;
     const pointAt = (s: number) => {
-      const w = ((s % n) + n) % n;
+      const w = s < 0 ? s + n : s >= n ? s - n : s;
       const k = Math.min(Math.floor(w), n - 1);
       const f = w - k;
       const g = segs[k]!;
