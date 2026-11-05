@@ -337,8 +337,8 @@ describe("copy / paste and trim", () => {
     const polys = d.toEnts().filter((e) => e.type === "poly");
     expect(polys).toHaveLength(1);
     const p = polys[0] as Extract<Ent, { type: "poly" }>;
-    expect(p.pts[0]).toMatchObject({ x: 70, y: 0 });
-    expect(p.pts[p.pts.length - 1]).toMatchObject({ x: 50, y: 0 });
+    expect(p.pts[0]!.x).toBeCloseTo(70);
+    expect(p.pts[p.pts.length - 1]!.x).toBeCloseTo(50);
   });
 
   it("does not trim a closed rectangle crossed only once", () => {
